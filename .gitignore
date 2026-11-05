@@ -1,0 +1,31 @@
+# Claude Code (personal assistant settings, not part of the project)
+.claude/
+CLAUDE.md
+
+# Secrets: the real database password lives only on each laptop.
+# .env.example (committed) lists the settings without the values.
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# C / Rust build output (rebuilt from source, never committed)
+impl/c/build/
+*.o
+impl/rust/target/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# Generated data and raw benchmark output (recreated by scripts)
+data/scaled/
+measure/results/*.raw
+
+# macOS
+.DS_Store
