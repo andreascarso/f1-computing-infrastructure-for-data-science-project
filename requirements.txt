@@ -1,0 +1,19 @@
+# Python environment for local development (see README, "Python environment").
+# Top-level libraries only, pinned; pip resolves the rest.
+# Tested on Python 3.13.
+
+# Data work (notebook Sections 2, 4, 5, 6)
+pandas==3.1.1
+numpy==2.5.4
+matplotlib==3.11.2
+seaborn==0.13.2
+
+# Notebook
+jupyter==1.1.1
+ipykernel==7.4.0
+
+# PostgreSQL access (loader, SQL scripts)
+psycopg[binary]==3.3.8
+
+# Dashboard (issue #23)
+streamlit==1.67.0
