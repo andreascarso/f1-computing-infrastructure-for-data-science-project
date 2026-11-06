@@ -31,3 +31,37 @@ python -c "import pandas, numpy, matplotlib, seaborn, psycopg, streamlit; print(
 **Adding a library:** install it, then add it to `requirements.txt` with a pinned
 version (`pip freeze | grep <name>`) in the same commit, so everyone stays in sync.
 The `.venv/` folder is never committed.
+
+## Database (Docker)
+
+PostgreSQL 16 runs in a container defined in `docker-compose.yml`. Its data lives
+in the named volume `dbdata`, so it survives restarts.
+
+**Requirements:** Docker with Compose v2.
+
+**Start (once per laptop):**
+
+```bash
+cp .env.example .env             # then edit .env and set your own password
+docker compose up -d
+docker compose ps                # wait until `db` shows (healthy)
+```
+
+`.env` holds the real password and is never committed; `.env.example` is the
+template.
+
+**Open a SQL prompt:**
+
+```bash
+docker compose exec db sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB'
+```
+
+From your laptop the database is on `localhost:5432`; from other containers in
+the compose file it is on host `db`.
+
+**Stop:**
+
+```bash
+docker compose down              # stops the container, keeps the data
+docker compose down -v           # also deletes the data volume (fresh start)
+```
