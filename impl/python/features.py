@@ -108,7 +108,8 @@ def base_table(clean):
     # Robustness split: whole seasons, shuffled inside each era
     train, val, test = era_seasons()
     assert val == EXPECTED_VAL_SEASONS and test == EXPECTED_TEST_SEASONS
-    assert set(train) | set(val) | set(test) == set(df["year"])
+    # <= rather than ==: the scaled 25%/50% sets (bench/scale_data.py) keep only some seasons
+    assert set(df["year"]) <= set(train) | set(val) | set(test)
     season_to_split = {**{y: "train" for y in train},
                        **{y: "validation" for y in val},
                        **{y: "test" for y in test}}
