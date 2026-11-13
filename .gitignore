@@ -25,6 +25,7 @@ impl/rust/target/
 
 # Generated data and raw benchmark output (recreated by scripts)
 data/scaled/
+bench/outputs/
 measure/results/*.raw
 
 # macOS

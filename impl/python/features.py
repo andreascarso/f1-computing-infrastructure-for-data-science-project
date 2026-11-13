@@ -15,6 +15,7 @@ Usage:
     python impl/python/features.py data/
     python impl/python/features.py data/ --repeat 3   # median of 3 runs per version
     python impl/python/features.py data/ --check      # A == B, leakage check, notebook numbers
+    python impl/python/features.py data/ --out bench/outputs/pandas.csv   # for bench/compare_outputs.py
 """
 
 import argparse
@@ -54,8 +55,13 @@ FEATURE_GROUPS = {
                   "cons_pre_points_share", "cons_pre_position"],
     "context": ["driver_age", "home_race", "round", "hybrid_era"],
 }
+# Order is the canonical column order of the output format; bench/compare_outputs.py
+# holds the same list (FEATURE_COLUMNS), keep the two in sync.
 FEATURES = [f for group in FEATURE_GROUPS.values() for f in group]
 TARGET = "podium"
+
+# Output format shared by all implementations (README, "Output equivalence check")
+OUTPUT_KEYS = ["raceId", "driverId"]
 
 SOURCE_DATE_COLUMNS = ["drv_form_source_date", "cons_form_source_date",
                        "drv_standings_source_date", "cons_standings_source_date"]
@@ -325,6 +331,18 @@ def leakage_check(df):
     assert not forbidden & set(FEATURES)
 
 
+def write_output(df, path):
+    """Write the feature table in the shared output format for bench/compare_outputs.py.
+
+    raceId, driverId, then FEATURES; sorted by (raceId, driverId); every feature
+    as a float with 6 decimals (also flags and counts); NaN as an empty field.
+    """
+    out = df[OUTPUT_KEYS + FEATURES].sort_values(OUTPUT_KEYS)
+    out[FEATURES] = out[FEATURES].astype("float64")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False, float_format="%.6f", na_rep="", lineterminator="\n")
+
+
 def check_against_notebook(df):
     """Key numbers the notebook prints in Section 6, compared with the script's."""
     known = {c: int(df[c].notna().sum()) for c in SOURCE_DATE_COLUMNS}
@@ -361,6 +379,9 @@ def main():
                         help="build each version N times and report the median (default 1)")
     parser.add_argument("--check", action="store_true",
                         help="check A == B, the leakage rule and the notebook's numbers (not timed)")
+    parser.add_argument("--out", type=Path, metavar="CSV",
+                        help="write the feature table (version B; A is identical, see --check) "
+                             "in the shared output format (not timed)")
     args = parser.parse_args()
 
     missing = [n for n in TABLE_NAMES if not (args.data_dir / f"{n}.csv").is_file()]
@@ -397,6 +418,10 @@ def main():
     df_a, df_b = tables_out["A"], tables_out["B"]
     print(f"\nFeature table: {df_a.shape[0]:,} rows, {df_a.shape[1]} columns, "
           f"{len(FEATURES)} model features")
+
+    if args.out:
+        write_output(df_b, args.out)
+        print(f"Wrote {args.out} (output format for bench/compare_outputs.py)")
 
     if args.check:
         print("\nVersion A vs. B:", end=" ")

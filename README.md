@@ -65,3 +65,45 @@ the compose file it is on host `db`.
 docker compose down              # stops the container, keeps the data
 docker compose down -v           # also deletes the data volume (fresh start)
 ```
+
+## Output equivalence check
+
+Before comparing run times, every implementation has to prove it builds the same
+feature table (notebook Section 6). Each one writes its table in one fixed
+format, and `bench/compare_outputs.py` diffs any two of these files.
+
+**Output format** (the same for pandas, SQL, R, C and Rust):
+
+- CSV with a header row, comma-separated, no index column, UTF-8
+- Columns: `raceId`, `driverId`, then the feature columns in this order:
+  `grid_filled, grid_zero_flag, field_size, quali_position_filled, has_qualifying,
+  quali_gap_pct, drv_prev_races, drv_podium_rate_last5, drv_avg_finish_last5,
+  drv_career_podium_rate, drv_circuit_podium_rate, cons_podiums_last5,
+  cons_avg_finish_last5, drv_pre_points_share, drv_pre_wins, drv_pre_position,
+  cons_pre_points_share, cons_pre_position, driver_age, home_race, round, hybrid_era`.
+  An implementation that builds only some features (the ports, #25–#27) writes
+  only those columns, in the same order.
+- Rows sorted by `raceId`, then `driverId`, ascending; one row per pair
+- `raceId` and `driverId` as integers. Every feature value with exactly 6
+  decimals (`printf("%.6f")`), also 0/1 flags and counts: `1.000000`, `18.000000`
+- NULL / NaN as an empty field
+
+In SQL: `round(x::numeric, 6)` for decimals and `x::numeric(20,6)` for integers.
+Quote the column aliases (`AS "raceId"`), because PostgreSQL lowercases unquoted
+names. Export with
+`\copy (SELECT ... ORDER BY "raceId", "driverId") TO 'file.csv' WITH (FORMAT csv, HEADER)`;
+in CSV mode NULL is already written as an empty field.
+
+**Write the pandas output and compare:**
+
+```bash
+python impl/python/features.py data/ --out bench/outputs/pandas.csv
+python bench/compare_outputs.py bench/outputs/pandas.csv bench/outputs/sql.csv
+```
+
+Values match when both are empty or they differ by at most `--tol` (default
+`1e-6`, one unit in the 6th decimal, since languages can round the last digit
+differently). The script lists columns that are only in one file, rows that are
+only in one file, values not written with 6 decimals, and the first differing
+rows (`--max-rows N`). It exits with 0 on a match and 1 otherwise. Files in
+`bench/outputs/` are generated and not committed.
