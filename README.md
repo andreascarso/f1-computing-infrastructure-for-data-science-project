@@ -66,6 +66,52 @@ docker compose down              # stops the container, keeps the data
 docker compose down -v           # also deletes the data volume (fresh start)
 ```
 
+## Scaled datasets
+
+The original data (26.8k results rows) is so small that a run mostly measures
+process startup. `bench/scale_data.py` writes smaller and larger copies, so we
+can check whether time doubles when the data doubles.
+
+```bash
+python bench/scale_data.py data/                    # writes data/scaled/{25pct,50pct,x10,x50}/
+python bench/scale_data.py data/ --sets 25pct x10   # only some sets
+```
+
+Any script that takes a data folder runs on a scaled set, e.g.
+`python impl/python/features.py data/scaled/x10`. The 100% set is `data/` itself.
+
+| set | how | rows (all tables) | size |
+|---|---|---|---|
+| `25pct` | every 4th season (1953, 1957, ... 2021): 18 seasons | 0.23 × | 5 MB |
+| `50pct` | every 2nd season (1951, 1953, ... 2023): 37 seasons | 0.48 × | 11 MB |
+| `data/` | original | 701k | 22 MB |
+| `x10` | original + 9 copies | 10 × | 245 MB |
+| `x50` | original + 49 copies | 50 × | 1.3 GB |
+
+- **Smaller sets** keep whole seasons spread over 1950–2024, with only the
+  drivers, constructors and circuits those seasons use. That way every table
+  shrinks by about the same share and both Q1 eras stay in. The most recent
+  seasons alone would be almost all lap times.
+- **Larger sets** repeat the whole history. Copy *k* gets new ids for races,
+  drivers, constructors and all row-level tables: `id + k × 10ⁿ`, with 10ⁿ just
+  above the largest id (race 18 → 10018, 20018, ...; driver 1 → 1001, 2001, ...).
+  `driverRef` / `constructorRef` get a `_k` suffix. Seasons, circuits and status
+  are shared. Each copy is its own field of drivers and teams racing on the same
+  dates at the same circuits. A copy's feature table is identical to the
+  original's, the Q1–Q3 rates stay the same and every count grows k-fold.
+  Exception: filters with a fixed minimum count (`MIN_STARTS_Q1 = 10`,
+  `MIN_STARTS_Q3 = 30`) let more groups through at ×10, so the Q1 circuit list
+  and its rank correlation change. At 25% too few circuits remain for the Q1
+  correlation.
+- Lines are copied byte for byte and only the leading id fields change. Quoting
+  and the `\N` sentinel stay as in `data/`, so load times stay comparable.
+- After writing, the script reads every set back: primary keys must be unique
+  and every foreign key must exist in its parent table (exit code 1 otherwise).
+- The notebook comparisons (`--check`) only hold for `data/`. On a scaled set
+  the counts differ by design.
+
+`data/scaled/` is generated (about 45 s for all four sets) and not committed.
+
 ## Output equivalence check
 
 Before comparing run times, every implementation has to prove it builds the same
