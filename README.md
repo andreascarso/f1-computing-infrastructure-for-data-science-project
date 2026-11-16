@@ -83,6 +83,20 @@ To load a scaled dataset (see below) instead:
 docker compose run --rm -e DATA_DIR=/data/scaled/x10 loader
 ```
 
+**Clean the data in SQL** (after loading):
+
+```bash
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < sql/clean.sql
+```
+
+`sql/clean.sql` is notebook Section 4 in SQL, with the same decisions as
+`impl/python/clean.py`. It builds new `<table>_clean` tables and leaves the raw
+tables untouched. The checks the notebook makes with `assert` are `DO` blocks
+that stop the script with an error, and at the end it prints each table's rows
+and columns next to the notebook's (a warning, not an error, on the scaled
+datasets). It runs in one transaction and can be re-run; loading again resets
+the raw tables but not the `_clean` ones, so re-run it after every load.
+
 **Stop:**
 
 ```bash
