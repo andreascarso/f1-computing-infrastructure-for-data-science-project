@@ -96,6 +96,9 @@ that stop the script with an error, and at the end it prints each table's rows
 and columns next to the notebook's (a warning, not an error, on the scaled
 datasets). It runs in one transaction and can be re-run; loading again resets
 the raw tables but not the `_clean` ones, so re-run it after every load.
+Besides the `_clean` tables it creates `nationality_country`, the mapping from a
+driver's nationality to the country names `circuits` uses ('British' → 'UK'),
+which gives `drivers_clean` its `home_country` columns (notebook 4.11.2).
 
 **Answer the questions in SQL** (after cleaning):
 
@@ -104,8 +107,9 @@ docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v O
 ```
 
 `sql/questions.sql` is notebook Section 5 in SQL, with the same logic as
-`impl/python/questions.py`. Each question is a view (`q1_conversion`,
-`q1_rank_correlation`), so it can be queried again from psql. The script prints
+`impl/python/questions.py`. Each question is a view (Q1: `q1_conversion`,
+`q1_rank_correlation`; Q2: `q2_home_by_grid`, `q2_home_advantage`), so it can be
+queried again from psql. The script prints
 the answer and compares the key numbers with the notebook, like `clean.sql`.
 Re-running `clean.sql` drops the views, so run `questions.sql` again after it.
 

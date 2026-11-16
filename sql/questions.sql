@@ -15,16 +15,16 @@
 
 BEGIN;
 
-DROP VIEW IF EXISTS q1_rank_correlation, q1_conversion;
+DROP VIEW IF EXISTS q2_home_advantage, q2_home_by_grid,
+                    q1_rank_correlation, q1_conversion;
 
 
 -- ---------------------------------------------------------------------------
 -- 5.1 Q1: which circuits convert a front-row start into a podium most often,
 -- and did that change after 2014?
 -- ---------------------------------------------------------------------------
--- Joins: results_clean -> races_clean (year, circuit) -> circuits (name), plus
--- qualifying_clean (qualifying position). The raw circuits table is enough:
--- Q1 only needs the name, and no name has HTML codes to decode.
+-- Joins: results_clean -> races_clean (year, circuit) -> circuits_clean (name),
+-- plus qualifying_clean (qualifying position).
 --
 -- Front row two ways: by grid (where the car started, after penalties) and by
 -- qualifying position (before penalties). Qualifying data starts in 1994, so
@@ -45,7 +45,7 @@ WITH q1_rows AS (
            COALESCE(q.position IN (1, 2), false) AS quali_front_row
     FROM results_clean r
     JOIN races_clean ra USING (raceId)
-    JOIN circuits c USING (circuitId)
+    JOIN circuits_clean c USING (circuitId)
     LEFT JOIN qualifying_clean q USING (raceId, driverId)
     WHERE ra.year >= 1994
 ),
@@ -125,8 +125,108 @@ SELECT front_row_by, circuits, round(rank_corr::numeric, 2) AS rank_corr
 FROM q1_rank_correlation
 ORDER BY front_row_by;
 
--- Key numbers next to the notebook's Section 5.1. A WARNING, not an error:
--- on the scaled datasets (bench/scale_data.py) they differ on purpose.
+
+-- ---------------------------------------------------------------------------
+-- 5.2 Q2: do drivers finish on the podium more often at home, after
+-- controlling for starting position?
+-- ---------------------------------------------------------------------------
+-- Joins: results_clean -> drivers_clean (home_country, home_country_2, 4.11.2)
+-- and results_clean -> races_clean -> circuits_clean (country).
+--
+-- A race is a home race when the circuit's country is the driver's home
+-- country (either one for dual nationalities). Home drivers might simply
+-- start further up, so home and away are compared inside the same
+-- starting-position group.
+--
+-- Conditional aggregation: FILTER (WHERE is_home) makes the home and the
+-- away columns in one GROUP BY, without a pivot step. Same columns as the
+-- pandas table, in snake_case.
+
+CREATE VIEW q2_home_by_grid AS
+WITH q2_rows AS (
+    SELECT r.podium,
+           -- most drivers have no second country: country = NULL is NULL,
+           -- and false OR NULL is NULL, so COALESCE makes it "away"
+           COALESCE(c.country = d.home_country OR c.country = d.home_country_2, false)
+               AS is_home,
+           -- the bins of pd.cut([-1, 0, 3, 6, 10, inf]); grid 0 (no slot
+           -- recorded, often a pit-lane start) is its own group
+           CASE
+               WHEN r.grid = 0   THEN 'grid 0'
+               WHEN r.grid <= 3  THEN '1–3'
+               WHEN r.grid <= 6  THEN '4–6'
+               WHEN r.grid <= 10 THEN '7–10'
+               ELSE                   '11+'
+           END AS grid_group,
+           -- to sort the groups by position, not alphabetically
+           CASE
+               WHEN r.grid = 0   THEN 0
+               WHEN r.grid <= 3  THEN 1
+               WHEN r.grid <= 6  THEN 2
+               WHEN r.grid <= 10 THEN 3
+               ELSE                   4
+           END AS group_order
+    FROM results_clean r
+    JOIN races_clean ra   USING (raceId)
+    JOIN circuits_clean c USING (circuitId)
+    JOIN drivers_clean d  USING (driverId)
+),
+by_group AS (
+    SELECT group_order, grid_group,
+           100.0 * avg(podium) FILTER (WHERE NOT is_home) AS rate_away,
+           100.0 * avg(podium) FILTER (WHERE is_home)     AS rate_home,
+           count(*) FILTER (WHERE NOT is_home)            AS starts_away,
+           count(*) FILTER (WHERE is_home)                AS starts_home
+    FROM q2_rows
+    GROUP BY group_order, grid_group
+)
+SELECT grid_group, rate_away, rate_home, starts_away, starts_home,
+       rate_home - rate_away AS difference_pp,
+       group_order
+FROM by_group;
+
+
+-- Q2 in one number: the group differences weighted by the number of home
+-- starts (pp), next to the raw rates without any control. A group without
+-- home (or away) starts has no difference (NULL); sum() skips NULLs, as
+-- pandas' sum() skips NaN.
+
+CREATE VIEW q2_home_advantage AS
+WITH totals AS (
+    SELECT sum(starts_home) AS starts_home,
+           sum(starts_away) AS starts_away,
+           sum(rate_home * starts_home) / sum(starts_home) AS raw_rate_home,
+           sum(rate_away * starts_away) / sum(starts_away) AS raw_rate_away,
+           sum(difference_pp * starts_home) / sum(starts_home) AS home_advantage_pp
+    FROM q2_home_by_grid
+)
+SELECT starts_home, starts_away,
+       100.0 * starts_home / (starts_home + starts_away) AS home_share,
+       raw_rate_home, raw_rate_away, home_advantage_pp
+FROM totals;
+
+
+SELECT grid_group,
+       round(rate_away, 2) AS "rate away", round(rate_home, 2) AS "rate home",
+       starts_away AS "starts away", starts_home AS "starts home",
+       round(difference_pp, 2) AS "difference (pp)"
+FROM q2_home_by_grid
+ORDER BY group_order;
+
+SELECT starts_home AS "home starts",
+       round(home_share, 1)        AS "home share (%)",
+       round(raw_rate_home, 1)     AS "raw rate home",
+       round(raw_rate_away, 1)     AS "raw rate away",
+       round(home_advantage_pp, 2) AS "home advantage (pp)"
+FROM q2_home_advantage;
+
+
+-- ---------------------------------------------------------------------------
+-- Key numbers next to the notebook's Section 5
+-- ---------------------------------------------------------------------------
+-- A WARNING, not an error: on the scaled datasets (bench/scale_data.py) they
+-- differ on purpose.
+
 DO $$
 DECLARE
     c RECORD;
@@ -146,7 +246,19 @@ BEGIN
              WHERE front_row_by = ''grid'' AND circuit = ''Suzuka Circuit'' AND era = ''2014–2024''', 88.9),
         (6, 'Q1 Hungaroring 1994–2013 (grid, %)',
             'SELECT round(rate, 1) FROM q1_conversion
-             WHERE front_row_by = ''grid'' AND circuit = ''Hungaroring'' AND era = ''1994–2013''', 72.5)
+             WHERE front_row_by = ''grid'' AND circuit = ''Hungaroring'' AND era = ''1994–2013''', 72.5),
+        (7, 'Q2 home starts',
+            'SELECT starts_home FROM q2_home_advantage', 1943),
+        (8, 'Q2 away starts',
+            'SELECT starts_away FROM q2_home_advantage', 22743),
+        (9, 'Q2 raw rate home (%)',
+            'SELECT round(raw_rate_home, 1) FROM q2_home_advantage', 11.6),
+        (10, 'Q2 raw rate away (%)',
+            'SELECT round(raw_rate_away, 1) FROM q2_home_advantage', 13.7),
+        (11, 'Q2 grid 1–3 difference (pp)',
+            'SELECT round(difference_pp, 2) FROM q2_home_by_grid WHERE grid_group = ''1–3''', 0.37),
+        (12, 'Q2 home advantage (pp)',
+            'SELECT round(home_advantage_pp, 2) FROM q2_home_advantage', -0.61)
     ) AS t(i, label, query, notebook)
     ORDER BY i
     LOOP
