@@ -8,11 +8,16 @@
 --   docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < sql/clean.sql
 --
 -- Safe to re-run: one transaction, and every _clean table is dropped first.
+-- CASCADE also drops the views built on them (sql/questions.sql); without it
+-- the DROP fails once those exist. Re-run questions.sql afterwards.
 
 BEGIN;
 
 DROP TABLE IF EXISTS status_clean, races_clean, qualifying_clean,
-                     lap_times_clean, pit_stops_clean, results_clean;
+                     lap_times_clean, pit_stops_clean, results_clean,
+                     nationality_country, drivers_clean, circuits_clean,
+                     constructors_clean
+CASCADE;
 
 
 -- ---------------------------------------------------------------------------
@@ -326,6 +331,149 @@ END $$;
 
 
 -- ---------------------------------------------------------------------------
+-- 4.11 drivers_clean: nationality -> home country
+-- ---------------------------------------------------------------------------
+-- 4.11.2 A home race is a race in the driver's home country, but drivers have
+-- a nationality ('British') and circuits a country ('UK'). nationality_country
+-- maps one to the other, written like circuits.country. It is a real table,
+-- not a temp one, so later queries (Q2, the home_race feature) can join it.
+-- home_country_2 is only set for the two dual nationalities.
+
+CREATE TABLE nationality_country (
+    nationality    TEXT PRIMARY KEY,
+    home_country   TEXT NOT NULL,
+    home_country_2 TEXT
+);
+
+INSERT INTO nationality_country (nationality, home_country, home_country_2) VALUES
+    ('American', 'USA', NULL), ('American-Italian', 'USA', 'Italy'),
+    ('Argentine', 'Argentina', NULL), ('Argentinian', 'Argentina', NULL),
+    ('Argentine-Italian', 'Argentina', 'Italy'),
+    ('Australian', 'Australia', NULL), ('Austrian', 'Austria', NULL),
+    ('Belgian', 'Belgium', NULL), ('Brazilian', 'Brazil', NULL), ('British', 'UK', NULL),
+    ('Canadian', 'Canada', NULL), ('Chilean', 'Chile', NULL), ('Chinese', 'China', NULL),
+    ('Colombian', 'Colombia', NULL), ('Czech', 'Czech Republic', NULL),
+    ('Danish', 'Denmark', NULL), ('Dutch', 'Netherlands', NULL),
+    ('East German', 'Germany', NULL), ('Finnish', 'Finland', NULL),
+    ('French', 'France', NULL), ('German', 'Germany', NULL),
+    ('Hong Kong', 'Hong Kong', NULL), ('Hungarian', 'Hungary', NULL),
+    ('Indian', 'India', NULL), ('Indonesian', 'Indonesia', NULL),
+    ('Irish', 'Ireland', NULL), ('Italian', 'Italy', NULL), ('Japanese', 'Japan', NULL),
+    ('Liechtensteiner', 'Liechtenstein', NULL), ('Malaysian', 'Malaysia', NULL),
+    ('Mexican', 'Mexico', NULL), ('Monegasque', 'Monaco', NULL),
+    ('New Zealander', 'New Zealand', NULL), ('Polish', 'Poland', NULL),
+    ('Portuguese', 'Portugal', NULL), ('Rhodesian', 'Zimbabwe', NULL),
+    ('Russian', 'Russia', NULL), ('South African', 'South Africa', NULL),
+    ('Spanish', 'Spain', NULL), ('Swedish', 'Sweden', NULL), ('Swiss', 'Switzerland', NULL),
+    ('Thai', 'Thailand', NULL), ('Uruguayan', 'Uruguay', NULL),
+    ('Venezuelan', 'Venezuela', NULL);
+
+-- Every listed nationality must exist in the data (catches spelling mismatches).
+-- Drivers or constructors: 'Hong Kong' is only a constructor nationality; it
+-- is kept so the table is the same as the pandas map.
+DO $$
+DECLARE unknown TEXT;
+BEGIN
+    SELECT string_agg(n.nationality, ', ') INTO unknown
+    FROM nationality_country n
+    WHERE NOT EXISTS (SELECT 1 FROM drivers d WHERE btrim(d.nationality) = n.nationality)
+      AND NOT EXISTS (SELECT 1 FROM constructors c WHERE btrim(c.nationality) = n.nationality);
+    IF unknown IS NOT NULL THEN
+        RAISE EXCEPTION 'nationality_country names not in drivers: %', unknown;
+    END IF;
+END $$;
+
+-- Same 13 columns as the pandas drivers table. dob is already a DATE (schema).
+-- Stray whitespace ('Argentinian ') is stripped before the lookup.
+-- Missing codes are generated from the surname and flagged; `number` stays
+-- missing (permanent numbers only exist from 2014).
+CREATE TABLE drivers_clean AS
+SELECT d.driverId, d.driverRef, d.number, d.code, d.forename, d.surname, d.dob,
+       btrim(d.nationality) AS nationality, d.url,
+       d.code IS NULL                                AS code_was_generated,
+       COALESCE(d.code, upper(left(d.surname, 3)))   AS code_filled,
+       n.home_country,
+       n.home_country_2
+FROM drivers d
+LEFT JOIN nationality_country n ON n.nationality = btrim(d.nationality)
+ORDER BY d.driverId;
+
+ALTER TABLE drivers_clean ADD PRIMARY KEY (driverId);
+
+DO $$
+DECLARE unmapped TEXT;
+BEGIN
+    -- the LEFT JOIN leaves home_country NULL for a nationality not in the map
+    SELECT string_agg(DISTINCT nationality, ', ') INTO unmapped
+    FROM drivers_clean WHERE home_country IS NULL;
+    IF unmapped IS NOT NULL THEN
+        RAISE EXCEPTION 'drivers_clean: unmapped nationality: %', unmapped;
+    END IF;
+    IF EXISTS (SELECT 1 FROM drivers_clean WHERE code_filled IS NULL) THEN
+        RAISE EXCEPTION 'drivers_clean: driver without a code';
+    END IF;
+END $$;
+
+
+-- ---------------------------------------------------------------------------
+-- 4.11.2, 4.15 circuits_clean
+-- ---------------------------------------------------------------------------
+-- The data writes the US both as 'USA' and 'United States'. One spelling,
+-- 'USA' (as nationality_country uses), so US home races are not missed.
+
+CREATE TABLE circuits_clean AS
+SELECT circuitId, circuitRef, name, location,
+       CASE WHEN country = 'United States' THEN 'USA' ELSE country END AS country,
+       lat, lng, alt, url
+FROM circuits
+ORDER BY circuitId;
+
+ALTER TABLE circuits_clean ADD PRIMARY KEY (circuitId);
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM circuits_clean WHERE country = 'United States') THEN
+        RAISE EXCEPTION 'circuits_clean: ''United States'' left';
+    END IF;
+    IF EXISTS (SELECT 1 FROM circuits_clean
+               WHERE lat NOT BETWEEN -90 AND 90 OR lng NOT BETWEEN -180 AND 180) THEN
+        RAISE EXCEPTION 'circuits_clean: coordinates out of range';
+    END IF;
+    IF EXISTS (SELECT 1 FROM races_clean r
+               WHERE NOT EXISTS (SELECT 1 FROM circuits_clean c WHERE c.circuitId = r.circuitId)) THEN
+        RAISE EXCEPTION 'circuits_clean: a race has no circuit';
+    END IF;
+END $$;
+
+
+-- ---------------------------------------------------------------------------
+-- 4.16 constructors_clean: decode HTML codes
+-- ---------------------------------------------------------------------------
+-- One name is stored with an HTML code: 'Lotus-Pratt &amp; Whitney'. '&amp;'
+-- is the only code in the data, so a replace() decodes it; the check below
+-- stops the script if new data brings another one ('&quot;', '&#39;', ...).
+
+CREATE TABLE constructors_clean AS
+SELECT constructorId, constructorRef,
+       replace(name, '&amp;', '&') AS name,
+       nationality, url
+FROM constructors
+ORDER BY constructorId;
+
+ALTER TABLE constructors_clean ADD PRIMARY KEY (constructorId);
+
+DO $$
+BEGIN
+    -- the same pattern as HTML_CODE in impl/python/clean.py
+    IF EXISTS (SELECT 1 FROM constructors_clean
+               WHERE concat_ws(' ', constructorRef, name, nationality, url)
+                     ~ '&(amp|quot|apos|lt|gt|#[0-9]+);') THEN
+        RAISE EXCEPTION 'constructors_clean: HTML code left';
+    END IF;
+END $$;
+
+
+-- ---------------------------------------------------------------------------
 -- 4.5 Rows and columns match the notebook's cleaned tables
 -- ---------------------------------------------------------------------------
 -- A WARNING, not an error: on the scaled datasets (bench/scale_data.py) the
@@ -343,7 +491,10 @@ BEGIN
         ('qualifying_clean', 10494, 12),
         ('lap_times_clean', 589081,  7),
         ('pit_stops_clean',  11371,  8),
-        ('results_clean',    24686, 22)
+        ('results_clean',    24686, 22),
+        ('drivers_clean',      861, 13),
+        ('circuits_clean',      77,  9),
+        ('constructors_clean', 212,  5)
     ) AS v(name, nb_rows, nb_cols)
     LOOP
         EXECUTE format('SELECT count(*) FROM %I', t.name) INTO n_rows;

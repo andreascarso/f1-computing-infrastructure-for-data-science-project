@@ -96,6 +96,38 @@ that stop the script with an error, and at the end it prints each table's rows
 and columns next to the notebook's (a warning, not an error, on the scaled
 datasets). It runs in one transaction and can be re-run; loading again resets
 the raw tables but not the `_clean` ones, so re-run it after every load.
+Besides the `_clean` tables it creates `nationality_country`, the mapping from a
+driver's nationality to the country names `circuits` uses ('British' → 'UK'),
+which gives `drivers_clean` its `home_country` columns (notebook 4.11.2).
+
+**Answer the questions in SQL** (after cleaning):
+
+```bash
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < sql/questions.sql
+```
+
+`sql/questions.sql` is notebook Section 5 in SQL, with the same logic as
+`impl/python/questions.py`. Each question is a view (Q1: `q1_conversion`,
+`q1_rank_correlation`; Q2: `q2_home_by_grid`, `q2_home_advantage`; Q3:
+`q3_mechanical_rate`), so it can be queried again from psql. The script prints
+the answer and compares the key numbers with the notebook, like `clean.sql`.
+Re-running `clean.sql` drops the views, so run `questions.sql` again after it.
+
+**Q1 with and without an index** (`sql/q1_index_timing.sql`, run after
+`questions.sql`): it times `SELECT * FROM q1_conversion` (median of 20 runs)
+without and with an index on `qualifying_clean (raceId, driverId)`, the one Q1
+join key that has no index. The index is dropped again at the end.
+
+| data | no index | with index |
+|---|---|---|
+| `data/` | 6.6 ms | 6.6 ms |
+| `x10` | 103 ms | 103 ms |
+| `x50` | 198 ms | 199 ms |
+
+The planner never uses the index (`idx_scan` stays 0; the plan is the same).
+Q1 reads every result row from 1994 on and joins about 85% of them to
+qualifying, so one sequential scan and a hash join beat looking up each row in
+an index. An index helps when a query needs only a few rows.
 
 **Stop:**
 
