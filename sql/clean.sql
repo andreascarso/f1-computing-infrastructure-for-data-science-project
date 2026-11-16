@@ -12,7 +12,7 @@
 BEGIN;
 
 DROP TABLE IF EXISTS status_clean, races_clean, qualifying_clean,
-                     lap_times_clean, pit_stops_clean;
+                     lap_times_clean, pit_stops_clean, results_clean;
 
 
 -- ---------------------------------------------------------------------------
@@ -220,6 +220,112 @@ END $$;
 
 
 -- ---------------------------------------------------------------------------
+-- 4.9 results_clean: the modeling table
+-- ---------------------------------------------------------------------------
+-- 4.9.4 One row per driver per race. Some (raceId, driverId) pairs have
+-- several rows (a car taken over mid-race). The row to keep is chosen
+-- without looking at the race result, so the target can't leak in:
+--   1. the row whose car (number + constructor) matches the driver's
+--      qualifying entry, if exactly one row matches
+--   2. otherwise the original entry, the lowest resultId (4.9.3)
+-- ROW_NUMBER() ranks the rows inside each pair; rank 1 is kept.
+-- Comparisons with a NULL give NULL, so COALESCE makes them false, like
+-- pandas' eq() with NaN.
+
+CREATE TEMP TABLE results_one_per_driver ON COMMIT DROP AS
+WITH matched AS (
+    SELECT r.*,
+           count(*) OVER (PARTITION BY r.raceId, r.driverId) AS group_size,
+           COALESCE(r.number = q.number AND r.constructorId = q.constructorId, false)
+               AS car_match
+    FROM results r
+    LEFT JOIN qualifying_clean q USING (raceId, driverId)
+),
+preferred AS (
+    SELECT m.*,
+           car_match AND count(*) FILTER (WHERE car_match)
+                             OVER (PARTITION BY raceId, driverId) = 1 AS preferred
+    FROM matched m
+),
+ranked AS (
+    SELECT p.*,
+           ROW_NUMBER() OVER (PARTITION BY raceId, driverId
+                              ORDER BY preferred DESC, resultId) AS rn
+    FROM preferred p
+)
+SELECT resultId, raceId, driverId, constructorId, number, grid, position,
+       positionText, positionOrder, points, laps, time, milliseconds,
+       fastestLap, rank, fastestLapTime, fastestLapSpeed, statusId,
+       CASE
+           WHEN group_size = 1 THEN 'single_record'
+           WHEN preferred      THEN 'unique_qualifying_match'
+           ELSE 'original_entry_fallback'
+       END AS selection_method
+FROM ranked
+WHERE rn = 1;
+
+-- 4.9.7 Remove non-starters (status category) and the Indianapolis 500
+-- (1950-1960, run with a separate field). 4.9.10 durations to seconds.
+-- 4.9.11 the target `podium`, made only now that the rows are fixed.
+
+CREATE TABLE results_clean AS
+SELECT r.*,
+       r.milliseconds / 1000.0 AS time_seconds,
+       EXTRACT(EPOCH FROM ('00:' || NULLIF(r.fastestLapTime, ''))::INTERVAL)
+           AS fastestLapTime_seconds,
+       (r.positionOrder <= 3)::INT AS podium
+FROM results_one_per_driver r
+WHERE r.statusId NOT IN (SELECT statusId FROM status_clean WHERE category = 'did_not_start')
+  AND r.raceId   NOT IN (SELECT raceId FROM races_clean WHERE name = 'Indianapolis 500')
+ORDER BY r.raceId, r.driverId;
+
+-- The primary key also checks that each driver now has one row per race
+ALTER TABLE results_clean ADD PRIMARY KEY (raceId, driverId);
+
+DO $$
+BEGIN
+    -- 4.9.2: the 6 rows without a car number were all non-starters
+    IF EXISTS (SELECT 1 FROM results_clean WHERE number IS NULL) THEN
+        RAISE EXCEPTION 'results_clean: row without a car number';
+    END IF;
+    -- 4.9.8 valid ranges
+    IF EXISTS (SELECT 1 FROM results_clean
+               WHERE points < 0 OR laps < 0 OR grid < 0 OR positionOrder < 1) THEN
+        RAISE EXCEPTION 'results_clean: value out of range';
+    END IF;
+    IF EXISTS (SELECT 1 FROM results_clean
+               WHERE fastestLapTime IS NOT NULL AND fastestLapTime_seconds IS NULL) THEN
+        RAISE EXCEPTION 'results_clean: fastest lap time not converted';
+    END IF;
+END $$;
+
+-- Rows after each step, next to the notebook's 4.9.7 cleaning log
+DO $$
+DECLARE
+    step RECORD;
+    n BIGINT;
+BEGIN
+    FOR step IN SELECT * FROM (VALUES
+        (1, 'raw results',                 'SELECT count(*) FROM results',               26759),
+        (2, 'after duplicate resolution',  'SELECT count(*) FROM results_one_per_driver', 26668),
+        (3, 'after removing non-starters', 'SELECT count(*) FROM results_one_per_driver
+                                             WHERE statusId NOT IN (SELECT statusId FROM status_clean
+                                                                    WHERE category = ''did_not_start'')', 25067),
+        (4, 'after excluding Indy 500',    'SELECT count(*) FROM results_clean',          24686)
+    ) AS v(i, label, query, nb_rows)
+    ORDER BY i
+    LOOP
+        EXECUTE step.query INTO n;
+        IF n = step.nb_rows THEN
+            RAISE NOTICE 'results: % % rows, same as the notebook', rpad(step.label, 28), n;
+        ELSE
+            RAISE WARNING 'results: % % rows, notebook has %', rpad(step.label, 28), n, step.nb_rows;
+        END IF;
+    END LOOP;
+END $$;
+
+
+-- ---------------------------------------------------------------------------
 -- 4.5 Rows and columns match the notebook's cleaned tables
 -- ---------------------------------------------------------------------------
 -- A WARNING, not an error: on the scaled datasets (bench/scale_data.py) the
@@ -236,7 +342,8 @@ BEGIN
         ('races_clean',       1125, 18),
         ('qualifying_clean', 10494, 12),
         ('lap_times_clean', 589081,  7),
-        ('pit_stops_clean',  11371,  8)
+        ('pit_stops_clean',  11371,  8),
+        ('results_clean',    24686, 22)
     ) AS v(name, nb_rows, nb_cols)
     LOOP
         EXECUTE format('SELECT count(*) FROM %I', t.name) INTO n_rows;
