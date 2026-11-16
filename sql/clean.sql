@@ -8,11 +8,14 @@
 --   docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < sql/clean.sql
 --
 -- Safe to re-run: one transaction, and every _clean table is dropped first.
+-- CASCADE also drops the views built on them (sql/questions.sql); without it
+-- the DROP fails once those exist. Re-run questions.sql afterwards.
 
 BEGIN;
 
 DROP TABLE IF EXISTS status_clean, races_clean, qualifying_clean,
-                     lap_times_clean, pit_stops_clean, results_clean;
+                     lap_times_clean, pit_stops_clean, results_clean
+CASCADE;
 
 
 -- ---------------------------------------------------------------------------
