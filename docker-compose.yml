@@ -14,5 +14,19 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # One-off job: docker compose run --rm loader
+  loader:
+    build: ./loader
+    env_file: .env
+    environment:
+      PGHOST: db            # the db service's name; localhost here would be the loader itself
+    volumes:
+      - ./data:/data:ro     # read-only: the loader never writes the CSVs
+      - ./sql:/sql:ro
+    depends_on:
+      db:
+        condition: service_healthy   # wait for pg_isready, not just for the container to start
+    restart: "no"
+
 volumes:
   dbdata:
