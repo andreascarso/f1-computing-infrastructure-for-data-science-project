@@ -1,0 +1,2 @@
+# Loader container (issue #7). Same pin as the root requirements.txt.
+psycopg[binary]==3.3.8
