@@ -108,8 +108,8 @@ docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v O
 
 `sql/questions.sql` is notebook Section 5 in SQL, with the same logic as
 `impl/python/questions.py`. Each question is a view (Q1: `q1_conversion`,
-`q1_rank_correlation`; Q2: `q2_home_by_grid`, `q2_home_advantage`), so it can be
-queried again from psql. The script prints
+`q1_rank_correlation`; Q2: `q2_home_by_grid`, `q2_home_advantage`; Q3:
+`q3_mechanical_rate`), so it can be queried again from psql. The script prints
 the answer and compares the key numbers with the notebook, like `clean.sql`.
 Re-running `clean.sql` drops the views, so run `questions.sql` again after it.
 

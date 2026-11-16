@@ -15,7 +15,8 @@
 
 BEGIN;
 
-DROP VIEW IF EXISTS q2_home_advantage, q2_home_by_grid,
+DROP VIEW IF EXISTS q3_mechanical_rate,
+                    q2_home_advantage, q2_home_by_grid,
                     q1_rank_correlation, q1_conversion;
 
 
@@ -222,6 +223,53 @@ FROM q2_home_advantage;
 
 
 -- ---------------------------------------------------------------------------
+-- 5.3 Q3: which constructors have the highest mechanical-retirement rate in
+-- 2014-2021 vs. 2022-2024?
+-- ---------------------------------------------------------------------------
+-- Joins: results_clean -> races_clean (year) -> status_clean (is_mechanical,
+-- 4.8) -> constructors_clean (name).
+--
+-- Rate = mechanical retirements / race starts. Non-starters were removed from
+-- results_clean (4.9.7), so every row is a car that started. Renamed teams
+-- stay under the name the data records (Force India, Racing Point and Aston
+-- Martin separately); names are unique, so grouping by name is grouping by team.
+
+CREATE VIEW q3_mechanical_rate AS
+SELECT CASE WHEN ra.year <= 2021 THEN '2014–2021' ELSE '2022–2024' END AS period,
+       co.name AS constructor,
+       count(*) AS starts,
+       sum(CASE WHEN s.is_mechanical THEN 1 ELSE 0 END) AS mechanical,
+       -- the average of a 0/1 column is the share of 1s; 1.0 (not 1) so the
+       -- average is numeric
+       100 * avg(CASE WHEN s.is_mechanical THEN 1.0 ELSE 0 END) AS rate
+FROM results_clean r
+JOIN races_clean ra        USING (raceId)
+JOIN status_clean s        USING (statusId)
+JOIN constructors_clean co USING (constructorId)
+-- WHERE filters rows before grouping ...
+WHERE ra.year BETWEEN 2014 AND 2024
+GROUP BY period, co.name
+-- ... HAVING filters the groups after: at least 30 starts in the period,
+-- because a rate from a few races is unreliable
+HAVING count(*) >= 30;
+
+
+-- The answer: both periods, highest rate first (the notebook's two tables)
+SELECT period, constructor, starts, mechanical, round(rate, 2) AS rate
+FROM q3_mechanical_rate
+ORDER BY period, rate DESC, constructor;
+
+-- All constructors together: did reliability improve?
+SELECT period,
+       sum(starts)     AS starts,
+       sum(mechanical) AS mechanical,
+       round(100.0 * sum(mechanical) / sum(starts), 1) AS rate
+FROM q3_mechanical_rate
+GROUP BY period
+ORDER BY period;
+
+
+-- ---------------------------------------------------------------------------
 -- Key numbers next to the notebook's Section 5
 -- ---------------------------------------------------------------------------
 -- A WARNING, not an error: on the scaled datasets (bench/scale_data.py) they
@@ -258,7 +306,23 @@ BEGIN
         (11, 'Q2 grid 1–3 difference (pp)',
             'SELECT round(difference_pp, 2) FROM q2_home_by_grid WHERE grid_group = ''1–3''', 0.37),
         (12, 'Q2 home advantage (pp)',
-            'SELECT round(home_advantage_pp, 2) FROM q2_home_advantage', -0.61)
+            'SELECT round(home_advantage_pp, 2) FROM q2_home_advantage', -0.61),
+        (13, 'Q3 starts 2014–2021',
+            'SELECT sum(starts) FROM q3_mechanical_rate WHERE period = ''2014–2021''', 3258),
+        (14, 'Q3 starts 2022–2024',
+            'SELECT sum(starts) FROM q3_mechanical_rate WHERE period = ''2022–2024''', 1354),
+        (15, 'Q3 mechanical 2014–2021',
+            'SELECT sum(mechanical) FROM q3_mechanical_rate WHERE period = ''2014–2021''', 303),
+        (16, 'Q3 constructors 2014–2021',
+            'SELECT count(*) FROM q3_mechanical_rate WHERE period = ''2014–2021''', 19),
+        (17, 'Q3 constructors 2022–2024',
+            'SELECT count(*) FROM q3_mechanical_rate WHERE period = ''2022–2024''', 12),
+        (18, 'Q3 Caterham 2014–2021 (%)',
+            'SELECT round(rate, 2) FROM q3_mechanical_rate
+             WHERE period = ''2014–2021'' AND constructor = ''Caterham''', 23.53),
+        (19, 'Q3 Alfa Romeo 2022–2024 (%)',
+            'SELECT round(rate, 2) FROM q3_mechanical_rate
+             WHERE period = ''2022–2024'' AND constructor = ''Alfa Romeo''', 12.50)
     ) AS t(i, label, query, notebook)
     ORDER BY i
     LOOP

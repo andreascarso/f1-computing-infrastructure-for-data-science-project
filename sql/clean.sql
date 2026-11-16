@@ -15,7 +15,8 @@ BEGIN;
 
 DROP TABLE IF EXISTS status_clean, races_clean, qualifying_clean,
                      lap_times_clean, pit_stops_clean, results_clean,
-                     nationality_country, drivers_clean, circuits_clean
+                     nationality_country, drivers_clean, circuits_clean,
+                     constructors_clean
 CASCADE;
 
 
@@ -446,6 +447,33 @@ END $$;
 
 
 -- ---------------------------------------------------------------------------
+-- 4.16 constructors_clean: decode HTML codes
+-- ---------------------------------------------------------------------------
+-- One name is stored with an HTML code: 'Lotus-Pratt &amp; Whitney'. '&amp;'
+-- is the only code in the data, so a replace() decodes it; the check below
+-- stops the script if new data brings another one ('&quot;', '&#39;', ...).
+
+CREATE TABLE constructors_clean AS
+SELECT constructorId, constructorRef,
+       replace(name, '&amp;', '&') AS name,
+       nationality, url
+FROM constructors
+ORDER BY constructorId;
+
+ALTER TABLE constructors_clean ADD PRIMARY KEY (constructorId);
+
+DO $$
+BEGIN
+    -- the same pattern as HTML_CODE in impl/python/clean.py
+    IF EXISTS (SELECT 1 FROM constructors_clean
+               WHERE concat_ws(' ', constructorRef, name, nationality, url)
+                     ~ '&(amp|quot|apos|lt|gt|#[0-9]+);') THEN
+        RAISE EXCEPTION 'constructors_clean: HTML code left';
+    END IF;
+END $$;
+
+
+-- ---------------------------------------------------------------------------
 -- 4.5 Rows and columns match the notebook's cleaned tables
 -- ---------------------------------------------------------------------------
 -- A WARNING, not an error: on the scaled datasets (bench/scale_data.py) the
@@ -465,7 +493,8 @@ BEGIN
         ('pit_stops_clean',  11371,  8),
         ('results_clean',    24686, 22),
         ('drivers_clean',      861, 13),
-        ('circuits_clean',      77,  9)
+        ('circuits_clean',      77,  9),
+        ('constructors_clean', 212,  5)
     ) AS v(name, nb_rows, nb_cols)
     LOOP
         EXECUTE format('SELECT count(*) FROM %I', t.name) INTO n_rows;
