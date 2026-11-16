@@ -59,6 +59,30 @@ docker compose exec db sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB'
 From your laptop the database is on `localhost:5432`; from other containers in
 the compose file it is on host `db`.
 
+**Load the data:**
+
+```bash
+docker compose run --rm --build loader
+```
+
+The `loader` container (`loader/`) runs `sql/schema.sql`, which drops and
+recreates the 14 tables, then copies each CSV from `data/` with
+`COPY ... WITH (FORMAT csv, HEADER, NULL '\N')`, so the dataset's `\N` becomes
+NULL. It prints the seconds per table and in total, and checks every table's
+row count against its CSV. Everything happens in one transaction: if any table
+fails, nothing is kept.
+
+It starts `db` if needed and waits until it is healthy. It is not part of
+`docker compose up`, because each run resets the database. Run it again
+whenever the CSVs change; `--build` is only needed after editing
+`loader/load_db.py`.
+
+To load a scaled dataset (see below) instead:
+
+```bash
+docker compose run --rm -e DATA_DIR=/data/scaled/x10 loader
+```
+
 **Stop:**
 
 ```bash

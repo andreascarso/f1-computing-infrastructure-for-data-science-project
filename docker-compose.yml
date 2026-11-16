@@ -15,7 +15,10 @@ services:
     restart: unless-stopped
 
   # One-off job: docker compose run --rm loader
+  # The profile keeps it out of `docker compose up`, which would otherwise
+  # reload (and so reset) the database every time the stack starts.
   loader:
+    profiles: ["load"]
     build: ./loader
     env_file: .env
     environment:
