@@ -3,6 +3,7 @@
     python bench/benchmark.py                                # data/, all implementations, 3 runs
     python bench/benchmark.py --datasets data x10 --runs 5
     python bench/benchmark.py --impl sql --datasets x50
+    python bench/benchmark.py --impl c rust r                # only the ports
 
 Runs on the laptop and drives the containers; it needs only Docker and
 Python 3.11+ (no packages: every query goes through psql inside the db
@@ -12,12 +13,16 @@ starts `bench`, runs the loader, and stops `bench` again at the end.
 For every dataset and implementation:
   1. startup: a no-op process in the same container, e.g. `python -c "import
      pandas"`, timed the same way as a real run (median of --runs)
+     Implementations: pandas (B, vectorised), pandas-lambda (A) and sql do
+     Sections 2, 4, 6 and Q1-Q3; the C, Rust and R ports do load, the cleaning
+     that 6.4 needs, form (6.4) and Q1.
   2. --runs repetitions, each a fresh process: the implementation's own timers
      give the parse step (load) and the compute steps; the wall clock of the
      whole process is measured from outside; `docker stats` samples the memory
      of the bench and db containers every 0.5 s in the background
-  3. check: the feature table must match the pandas one (bench/compare_outputs.py);
-     if it does not, nothing of that dataset is stored
+  3. check: the feature table must match the pandas one (bench/compare_outputs.py),
+     and the ports' Q1 the pandas Q1; if one does not, nothing of that dataset
+     is stored
   4. SQL only: pg_database_size() and every table's size next to its CSV size
 Every number goes into benchmark_results (sql/benchmark_results.sql), the
 median over the repetitions plus min and max.
@@ -43,8 +48,29 @@ OUTPUTS = Path("bench/outputs")               # relative to ROOT, the same insid
 COMPARE = ROOT / "bench" / "compare_outputs.py"
 RESULTS_SCHEMA = ROOT / "sql" / "benchmark_results.sql"
 
-IMPLEMENTATIONS = ["pandas", "pandas-lambda", "sql"]
+IMPLEMENTATIONS = ["pandas", "pandas-lambda", "sql", "c", "rust", "r"]
 PANDAS_VERSIONS = {"pandas": "B", "pandas-lambda": "A"}
+
+# The ports (load, the cleaning 6.4 needs, form 6.4, Q1) in the bench container.
+# C and Rust are compiled into the image (bench/Dockerfile); R runs from impl/.
+PORTS = {
+    "c": ["/opt/ports/f1-c"],
+    "rust": ["/opt/ports/f1-rust"],
+    "r": ["Rscript", "impl/r/run.R"],   # one data.table thread (its default)
+}
+# A no-op process per port, for startup: C and Rust print their usage and exit 2
+PORT_STARTUP = {
+    "c": ("process start", ["/opt/ports/f1-c"], (2,)),
+    "rust": ("process start", ["/opt/ports/f1-rust"], (2,)),
+    "r": ("R + data.table", ["Rscript", "-e", "suppressPackageStartupMessages(library(data.table))"], (0,)),
+}
+# The ports print their step times as text; these map the lines to our steps.
+# C and Rust: "form (6.4)               0.0033 s"
+CR_STEPS = {"parse (Section 2)": "load", "clean (4.9)": "clean", "form (6.4)": "form", "Q1 (5.1)": "q1"}
+# R: a printed data.table, "4: rolling form (median)   0.107"
+R_STEPS = {"load 14 tables": "load", "clean required tables": "clean", "base join + sort": "base",
+           "rolling form (median)": "rolling", "Q1 (median)": "q1"}
+Q1_TOLERANCE = 1e-6   # the ports write Q1 rates with 6 decimals
 
 TABLE_NAMES = [
     "seasons", "circuits", "status", "drivers", "constructors", "races", "results",
@@ -64,12 +90,12 @@ class CommandFailed(Exception):
     pass
 
 
-def run(cmd, stdin=None):
+def run(cmd, stdin=None, ok_codes=(0,)):
     """Run a command; return (stdout, start, end) in time.perf_counter() seconds."""
     start = time.perf_counter()
     proc = subprocess.run(cmd, cwd=ROOT, input=stdin, capture_output=True, text=True)
     end = time.perf_counter()
-    if proc.returncode != 0:
+    if proc.returncode not in ok_codes:
         tail = "\n".join((proc.stderr or proc.stdout).strip().splitlines()[-15:])
         hint = "  (exit 137: out of memory? raise Docker's memory limit)" if proc.returncode == 137 else ""
         raise CommandFailed(f"{' '.join(cmd)}\nexit code {proc.returncode}{hint}\n{tail}")
@@ -189,6 +215,31 @@ def compare(reference, other):
     return proc.returncode == 0, proc.stdout.strip()
 
 
+def compare_q1(reference, other):
+    """Q1 in the long layout of questions.py --out: the same rows (front_row_by,
+    circuit, era), equal starts and podiums, rates within Q1_TOLERANCE.
+    Returns (matched, report)."""
+    def read(path):
+        with open(ROOT / path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            return reader.fieldnames, {(r["front_row_by"], r["circuit"], r["era"]): r for r in reader}
+
+    (ref_cols, ref), (cols, rows) = read(reference), read(other)
+    problems = [] if cols == ref_cols else [f"columns {cols}, expected {ref_cols}"]
+    problems += [f"missing row {key}" for key in sorted(ref.keys() - rows.keys())]
+    problems += [f"extra row {key}" for key in sorted(rows.keys() - ref.keys())]
+    for key in sorted(ref.keys() & rows.keys()):
+        a, b = ref[key], rows[key]
+        for col in ("starts", "podiums"):
+            if float(a[col]) != float(b[col]):
+                problems.append(f"{key} {col}: {a[col]} vs {b[col]}")
+        if abs(float(a["rate"]) - float(b["rate"])) > Q1_TOLERANCE:
+            problems.append(f"{key} rate: {a['rate']} vs {b['rate']}")
+    if problems:
+        return False, f"Q1: {len(problems)} differences\n" + "\n".join(problems[:10])
+    return True, f"Q1: {len(ref)} rows MATCH"
+
+
 # ---------------------------------------------------------------------------
 # pandas (bench container)
 # ---------------------------------------------------------------------------
@@ -202,9 +253,11 @@ def pandas_command(bench, ds, impl, *extra):
 
 
 def pandas_check(bench, ds, impl):
-    out = ds.outputs / f"{impl}.csv"
-    run(pandas_command(bench, ds, impl, "--no-questions", "--out", str(out)))
-    return out
+    """Write the feature table (and for the reference also Q1); returns their paths."""
+    out, q1_out = ds.outputs / f"{impl}.csv", ds.outputs / f"{impl}_q1.csv"
+    extra = ["--q1-out", str(q1_out)] if impl == "pandas" else []
+    run(pandas_command(bench, ds, impl, "--no-questions", "--out", str(out), *extra))
+    return out, q1_out
 
 
 def measure_pandas(m, sampler, idle, bench, ds, impl, runs):
@@ -226,6 +279,62 @@ def measure_pandas(m, sampler, idle, bench, ds, impl, runs):
         m.add(impl, "peak", "memory", sampler.peak("bench", start, end), "MiB", "bench")
         m.add(impl, "process max RSS", "memory", result["max_rss_mib"], "MiB", "bench")
         print(f"    run {i + 1}/{runs}: {end - start:.2f} s")
+
+
+# ---------------------------------------------------------------------------
+# C, Rust and R ports (bench container)
+# ---------------------------------------------------------------------------
+
+def port_steps(impl, output):
+    """The step times (seconds) a port prints, by our step names."""
+    names, line = (R_STEPS, r"\s*\d+:\s+(.+?)\s+([\d.]+)\s*") if impl == "r" else \
+                  (CR_STEPS, r"(.+?)\s+([\d.]+) s")
+    steps = {}
+    for text in output.splitlines():
+        m = re.fullmatch(line, text)
+        if m and m.group(1).strip() in names:
+            steps[names[m.group(1).strip()]] = float(m.group(2))
+    missing = set(names.values()) - steps.keys()
+    if missing:
+        raise CommandFailed(f"{impl}: no time for {', '.join(sorted(missing))} in its output "
+                            f"(did the printed format change?)\n{output[-1500:]}")
+    return steps
+
+
+def measure_port(m, sampler, idle, bench, ds, impl, runs):
+    name, noop, ok_codes = PORT_STARTUP[impl]
+    for _ in range(runs):
+        _, start, end = run(["docker", "exec", bench, *noop], ok_codes=ok_codes)
+        m.add(impl, name, "startup", end - start, container="bench")
+
+    m.add(impl, "idle", "memory", idle["bench"], "MiB", "bench")
+    # GNU time reports the process's max RSS; -o /dev/stdout puts it after the
+    # port's own output, where the harness reads it
+    timed = ["/usr/bin/time", "-f", "max_rss_kib=%M", "-o", "/dev/stdout"]
+    for i in range(runs):
+        out, start, end = run(["docker", "exec", bench, *timed, *PORTS[impl], ds.rel])
+        steps = port_steps(impl, out)
+        m.add(impl, "load", "parse", steps["load"], container="bench")
+        m.add(impl, "clean", "compute", steps["clean"], container="bench")
+        if impl == "r":
+            # R times the join + sort before the rolling windows on its own; C
+            # and Rust sort inside their form step, so form is both together
+            m.add(impl, "form", "compute", steps["base"] + steps["rolling"], container="bench")
+            m.add(impl, "form: join + sort", "detail", steps["base"], container="bench")
+        else:
+            m.add(impl, "form", "compute", steps["form"], container="bench")
+        m.add(impl, "q1", "compute", steps["q1"], container="bench")
+        m.add(impl, "total", "total", end - start, container="bench")
+        m.add(impl, "peak", "memory", sampler.peak("bench", start, end), "MiB", "bench")
+        rss = re.search(r"max_rss_kib=(\d+)", out)
+        m.add(impl, "process max RSS", "memory", int(rss.group(1)) / 1024, "MiB", "bench")
+        print(f"    run {i + 1}/{runs}: {end - start:.2f} s")
+
+
+def port_check(bench, ds, impl):
+    out, q1_out = ds.outputs / f"{impl}.csv", ds.outputs / f"{impl}_q1.csv"
+    run(["docker", "exec", bench, *PORTS[impl], ds.rel, "--out", str(out), "--q1-out", str(q1_out)])
+    return out, q1_out
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +453,8 @@ def fmt(value, unit="s"):
     if value is None:
         return "–"
     if unit == "s":
+        if value < 0.01:
+            return f"{value * 1000:.1f} ms"
         return f"{value * 1000:.0f} ms" if value < 1 else f"{value:.2f} s"
     if unit == "MiB":
         return f"{value:,.0f} MiB"
@@ -364,10 +475,12 @@ def print_summary(m, ds, impls, runs):
     steps = ["load", "clean", "features", "form", "q1", "q2", "q3"]
     print(f"\n  {'step':<10}" + "".join(f"{impl:>15}" for impl in impls))
     for step in steps:
-        cells = [m.median(impl, step, "detail" if step == "form" else
-                          "parse" if step == "load" else "compute") for impl in impls]
+        kinds = ["parse"] if step == "load" else ["compute", "detail"]   # form: detail in pandas/SQL
+        cells = [next((v for k in kinds if (v := m.median(impl, step, k)) is not None), None)
+                 for impl in impls]
         print(f"  {step:<10}" + "".join(f"{fmt(c):>15}" for c in cells))
-    print("  (form is part of features)")
+    print("  pandas and SQL: form is part of features, clean covers all tables.\n"
+          "  C, Rust, R: only the cleaning that form needs, then form and Q1.")
 
     if "sql" in impls:
         csv, raw, db = (m.median("csv", "all tables", "storage"), m.median("sql", "all tables", "storage"),
@@ -446,7 +559,7 @@ def main():
             reference = None
             if not args.skip_check:
                 print("  check: pandas reference output")
-                reference = pandas_check(bench, ds, "pandas")
+                reference, reference_q1 = pandas_check(bench, ds, "pandas")
                 m.checked["pandas"] = True
 
             for impl in impls:
@@ -454,10 +567,21 @@ def main():
                 if impl.startswith("pandas"):
                     measure_pandas(m, sampler, idle, bench, ds, impl, args.runs)
                     if impl != "pandas" and reference:
-                        ok, report = compare(reference, pandas_check(bench, ds, impl))
+                        ok, report = compare(reference, pandas_check(bench, ds, impl)[0])
                         m.checked[impl] = ok
                         if not ok:
                             mismatches.append((impl, report))
+                elif impl in PORTS:
+                    measure_port(m, sampler, idle, bench, ds, impl, args.runs)
+                    if reference:
+                        out, q1_out = port_check(bench, ds, impl)
+                        ok, report = compare(reference, out)
+                        ok_q1, report_q1 = compare_q1(reference_q1, q1_out)
+                        m.checked[impl] = ok and ok_q1
+                        if not ok:
+                            mismatches.append((impl, report))
+                        if not ok_q1:
+                            mismatches.append((f"{impl} (Q1)", report_q1))
                 else:
                     measure_sql(m, sampler, idle, db, ds, args.runs)
                     measure_storage(m, db, ds)
