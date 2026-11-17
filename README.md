@@ -129,6 +129,29 @@ Q1 reads every result row from 1994 on and joins about 85% of them to
 qualifying, so one sequential scan and a hash join beat looking up each row in
 an index. An index helps when a query needs only a few rows.
 
+**Build the features in SQL** (after cleaning):
+
+```bash
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < sql/features.sql
+```
+
+`sql/features.sql` is notebook Section 6 in SQL, with the same logic as
+`impl/python/features.py`. Each step is a table with one row per driver per
+race: `features_grid` holds the base table with both splits (6.1), the grid
+features (6.2) and the qualifying features (6.3). The script prints the
+notebook's numbers next to its own. The feature tables are copies, not views:
+re-running `clean.sql` leaves them out of date, so run `features.sql` again
+after it.
+
+To compare with pandas, write both outputs and diff them (see
+[Output equivalence check](#output-equivalence-check)):
+
+```bash
+docker compose exec -T db sh -c 'psql -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < sql/export_features.sql > bench/outputs/sql.csv
+python impl/python/features.py data/ --out bench/outputs/pandas.csv
+python bench/compare_outputs.py bench/outputs/pandas.csv bench/outputs/sql.csv
+```
+
 **Stop:**
 
 ```bash
