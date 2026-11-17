@@ -264,3 +264,70 @@ differently). The script lists columns that are only in one file, rows that are
 only in one file, values not written with 6 decimals, and the first differing
 rows (`--max-rows N`). It exits with 0 on a match and 1 otherwise. Files in
 `bench/outputs/` are generated and not committed.
+
+## Rust port
+
+`impl/rust/` does the same work as the C port (`impl/c/`) with the same
+algorithm: notebook Section 2 (load), the results cleaning that 6.4 needs (4.9),
+the driver/constructor form (6.4) and Q1 (5.1). The only dependency is the
+`csv` crate (no polars); everything else is the standard library.
+
+**Requirements:** Rust with Cargo, installed with [rustup](https://rustup.rs)
+(`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`, then open a
+new terminal or run `source "$HOME/.cargo/env"`).
+
+**Build and run:**
+
+```bash
+cargo build --release --manifest-path impl/rust/Cargo.toml   # writes impl/rust/target/release/f1
+impl/rust/target/release/f1 data/                            # prints row counts, Q1 and timings
+impl/rust/target/release/f1 data/ --out bench/outputs/rust.csv --q1-out bench/outputs/rust_q1.csv
+python bench/compare_outputs.py bench/outputs/pandas.csv bench/outputs/rust.csv
+```
+
+Always build with `--release`: a debug build has no optimisation and runs many
+times slower.
+
+| file | what it does |
+|---|---|
+| `src/table.rs` | a table read with the `csv` crate: all fields in one `String` plus their end offsets; `\N` and empty fields come back as `None` |
+| `src/main.rs` | load, cleaning (4.9), the qualifying `HashMap`, timing and options |
+| `src/form.rs` | form (6.4): sort by (driverId, date), ring buffer with a sliding sum per driver and per team; output in the shared format |
+| `src/q1.rs` | Q1 (5.1): `HashMap` join with qualifying on (raceId, driverId), counts per circuit and era, Spearman rank correlation |
+
+**Same algorithm as C, in safe Rust:** the steps match `impl/c/f1.c` one to one
+(sort + sliding sum for 6.4, a hash join for Q1). The differences are in the
+language: missing values are `Option<f64>` instead of `NAN`, so the compiler
+makes every use check for "no value"; there is no `malloc`/`free` and no
+manual index bookkeeping; `HashMap` and `sort_unstable_by_key` come from the
+standard library instead of a hand-written hash map and `qsort`. Out-of-range
+indexing stops the program with an error instead of reading wrong memory.
+
+**Checked:** `compare_outputs.py` gives MATCH against pandas and C on the 7
+form columns, also with `--tol 0`, and against pandas on `x10`. `--q1-out` is
+byte-for-byte the same file as the C port's and equals `q1.csv` from
+`impl/python/questions.py --out` (58 rows). Rank correlations: −0.07 (grid) and
++0.20 (qualifying), as in the notebook.
+
+**Timing** (median of 3, MacBook Air M-series, C and Rust in the same session;
+pandas numbers from the C port measurement):
+
+| step | data | Rust | C | pandas B (vectorised) |
+|---|---|---|---|---|
+| parse / load 14 tables | `data/` | 34 ms | 19 ms | 34 ms |
+| clean (4.9) | `data/` | 3.3 ms | 4.9 ms | |
+| form (6.4) | `data/` | 2.0 ms | 3.3 ms | 46 ms |
+| Q1 (5.1) | `data/` | 0.3 ms | 0.3 ms | 8.8 ms |
+| parse / load 14 tables | `x10` | 345 ms | 195 ms | 224 ms |
+| clean (4.9) | `x10` | 33 ms | 50 ms | |
+| form (6.4) | `x10` | 26 ms | 41 ms | 427 ms |
+| Q1 (5.1) | `x10` | 3.9 ms | 3.1 ms | 35 ms |
+
+Safety does not cost speed here: Rust's compute steps are as fast as C's or
+faster. The likely reason is the sorting: `sort_unstable_by_key` is compiled
+for the exact key type, so comparisons are inlined, while C's `qsort` calls the
+comparison function through a pointer for every pair. Parsing is slower in Rust
+because the `csv` crate copies every field into the table's buffer and checks
+UTF-8, while the C parser splits the file buffer in place without copying. An
+earlier version that kept one `StringRecord` per row was about twice as slow
+again; one buffer for the whole table, as in C, closed most of that gap.
