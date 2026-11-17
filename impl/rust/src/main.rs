@@ -6,8 +6,10 @@
 //!   cargo build --release --manifest-path impl/rust/Cargo.toml
 //!   impl/rust/target/release/f1 data/
 //!   impl/rust/target/release/f1 data/ --out bench/outputs/rust.csv   # for bench/compare_outputs.py
+//!   impl/rust/target/release/f1 data/ --q1-out bench/outputs/rust_q1.csv
 
 mod form;
+mod q1;
 mod table;
 
 use std::collections::HashMap;
@@ -73,7 +75,7 @@ fn parse_date(s: &str) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// One row of results_clean, joined with its race (circuit, year, date)
-#[allow(dead_code)] // result_id, year, round, grid: used by Q1 or kept for parity with the C struct
+#[allow(dead_code)] // result_id and round are kept for parity with the C struct
 struct RaceResult {
     result_id: i64,
     race_id: i64,
@@ -212,11 +214,12 @@ fn clean_results(tables: &HashMap<&str, Table>, quali_index: &QualiIndex) -> Vec
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let (mut data_dir, mut out_path) = (None, None);
+    let (mut data_dir, mut out_path, mut q1_path) = (None, None, None);
     let mut rest = args.iter().skip(1);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--out" => out_path = rest.next(),
+            "--q1-out" => q1_path = rest.next(),
             _ if data_dir.is_none() && !arg.starts_with('-') => data_dir = Some(arg),
             _ => {
                 data_dir = None;
@@ -225,7 +228,7 @@ fn main() -> ExitCode {
         }
     }
     let Some(data_dir) = data_dir else {
-        eprintln!("usage: {} DATA_DIR [--out CSV]", args[0]);
+        eprintln!("usage: {} DATA_DIR [--out CSV] [--q1-out CSV]", args[0]);
         return ExitCode::from(2);
     };
     let (tables, t_parse) = match load_tables(Path::new(data_dir)) {
@@ -250,9 +253,24 @@ fn main() -> ExitCode {
     println!("6.4 rows with driver form {with_driver_form:>8}");
     println!("6.4 rows with team form   {with_team_form:>8}");
 
+    let start = Instant::now();
+    let answer = q1::q1(&tables, &results, &quali_index);
+    let t_q1 = start.elapsed().as_secs_f64();
+
+    for (def, table) in answer.by.iter().enumerate() {
+        println!(
+            "Q1 by {:<10} {:>2} circuits, rank correlation between eras {:+.2}",
+            q1::FRONT_ROW_BY[def],
+            table.len(),
+            q1::rank_correlation(table)
+        );
+    }
+
     println!("\n{:<22} {t_parse:8.4} s", "parse (Section 2)");
     println!("{:<22} {t_clean:8.4} s", "clean (4.9)");
     println!("{:<22} {t_form:8.4} s", "form (6.4)");
+    println!("{:<22} {t_q1:8.4} s", "Q1 (5.1)");
+    println!("{:<22} {:8.4} s", "compute total", t_clean + t_form + t_q1);
 
     if let Some(path) = out_path {
         if let Err(e) = form::write_output(Path::new(path), &results, &form) {
@@ -260,6 +278,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         println!("\nWrote {path} (output format for bench/compare_outputs.py)");
+    }
+    if let Some(path) = q1_path {
+        if let Err(e) = q1::write_q1(Path::new(path), &answer) {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("Wrote {path} (same layout as q1.csv from impl/python/questions.py --out)");
     }
     ExitCode::SUCCESS
 }
