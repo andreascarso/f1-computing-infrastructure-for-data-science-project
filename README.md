@@ -265,6 +265,79 @@ only in one file, values not written with 6 decimals, and the first differing
 rows (`--max-rows N`). It exits with 0 on a match and 1 otherwise. Files in
 `bench/outputs/` are generated and not committed.
 
+## Benchmark
+
+`bench/benchmark.py` runs the implementations in their containers, times them
+and stores every number in the `benchmark_results` table. It runs on the laptop
+and needs only Docker and Python 3.11+ (no packages). All queries go through
+`psql` inside the `db` container, so a Postgres installed on the laptop itself
+on port 5432 does not get in the way.
+
+```bash
+docker compose up -d --wait                          # the database must be running
+python3 bench/benchmark.py                           # data/, all implementations, 3 runs
+python3 bench/benchmark.py --datasets data x10 --runs 5
+python3 bench/benchmark.py --impl sql --datasets x50
+```
+
+Implementations: `pandas` (vectorised, version B), `pandas-lambda` (version A,
+only load, clean and features: Q1–Q3 do not depend on the version) and `sql`
+(loader + `clean.sql` + `features.sql` + `questions.sql`). The ports join in #28.
+Scaled datasets must be written first (see [Scaled datasets](#scaled-datasets)).
+
+**What it measures**, per dataset and implementation:
+
+| kind | how |
+|---|---|
+| startup | a no-op process in the same container, timed the same way as a real run: `python -c "import pandas, numpy"` in `bench`; `psql -c 'SELECT 1'` and the loader container with `python -c "import psycopg"` for SQL |
+| parse | reading the 14 CSVs: pandas `read_csv` (the `load_tables` timer); SQL `COPY` (the loader's "total (wall clock)") |
+| compute | clean, features and Q1–Q3. pandas: the script's own timers (`bench/run_pandas.py`). SQL: the scripts run with `\timing` on for every statement and the `Time:` lines are added up; Q1–Q3 are `EXPLAIN ANALYZE` of the question views (planning + execution inside Postgres). `form` (6.4) is stored too, as a part of `features` |
+| total | wall clock of all processes of one repetition, measured from outside |
+| memory | the container's peak in `docker stats` (sampled every 0.5 s in the background; needs at least two samples, so runs under about a second have none), its idle value before the benchmark, and for pandas the process's own max RSS (`getrusage`) |
+| storage | after the SQL runs: every table's `pg_total_relation_size()` next to its CSV, the 14 tables together and `pg_database_size()` |
+
+Each repetition is a fresh process (`docker exec` into the idle `bench`
+container, a new loader container, new `psql` processes); every number is the
+median of `--runs` repetitions (default 3), with min and max next to it.
+Before anything is stored, each implementation's feature table is compared with
+the pandas one (`bench/compare_outputs.py`, written to `bench/outputs/<dataset>/`).
+If one differs, nothing is stored for that dataset; `--skip-check` stores the
+results anyway, with `output_checked = false`.
+
+The table is created by the harness (`sql/benchmark_results.sql`) and survives
+reloading the data: one row per number, in long format (`implementation`,
+`step`, `kind`, `unit`, `value` = median, `min_value`, `max_value`, `runs`,
+`container`, `output_checked`), plus `run_id`, `dataset` and `machine`.
+
+```bash
+docker compose exec db sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c "SELECT dataset, implementation, step, kind, value FROM benchmark_results ORDER BY 1, 2, 4"'
+```
+
+Example on `x10` (Apple M4, Docker with 10 CPUs and 7.7 GiB; medians of 3):
+
+| implementation | startup | parse | compute | total | peak memory |
+|---|---|---|---|---|---|
+| pandas | 253 ms | 811 ms | 1.60 s | 2.75 s | 1,433 MiB |
+| pandas-lambda | 248 ms | 730 ms | 14.4 s | 15.7 s | 1,798 MiB |
+| sql | 431 ms | 37.1 s | 11.8 s | 52.9 s | 394 MiB |
+
+The 14 tables take 772 MB in Postgres for 245 MB of CSV (3.2×): every row has
+a header and alignment padding, and the primary keys add indexes.
+
+**Keep in mind:**
+
+- The containers read `data/` through Docker Desktop's file sharing, which is
+  slower than the laptop's disk, so pandas loads more slowly here than
+  `impl/python/load.py` run directly.
+- `docker stats` counts the page cache of files the container has read recently,
+  so a container's peak is at least as large as the data it has just read.
+  Max RSS is the process alone.
+- pandas needs about 6.4 GB on `x50` (measured outside Docker). Docker Desktop's
+  default memory limit may be too small; raise it under *Settings → Resources*
+  if a run stops with exit code 137.
+- `--impl sql` resets the database (the loader drops and reloads the 14 raw
+  tables), but not `benchmark_results`.
+
 ## C port
 
 `impl/c/` does notebook Section 2 (load), the results cleaning that 6.4 needs

@@ -31,5 +31,17 @@ services:
         condition: service_healthy   # wait for pg_isready, not just for the container to start
     restart: "no"
 
+  # Runs the implementations for bench/benchmark.py, which starts it, runs each
+  # repetition with `docker exec` and stops it again. The profile keeps it out
+  # of `docker compose up`.
+  bench:
+    profiles: ["bench"]
+    build: ./bench
+    volumes:
+      - ./impl:/work/impl:ro
+      - ./data:/work/data:ro
+      - ./bench:/work/bench   # writable: the check runs write bench/outputs/
+    restart: "no"
+
 volumes:
   dbdata:
