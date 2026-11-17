@@ -8,7 +8,7 @@ CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 
 BUILD := build
 SRC   := f1.c csv.c
-HDR   := csv.h
+HDR   := csv.h pairmap.h
 
 $(BUILD)/f1: $(SRC) $(HDR) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
