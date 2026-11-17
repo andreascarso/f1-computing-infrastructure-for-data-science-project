@@ -16,7 +16,8 @@ BEGIN;
 DROP TABLE IF EXISTS status_clean, races_clean, qualifying_clean,
                      lap_times_clean, pit_stops_clean, results_clean,
                      nationality_country, drivers_clean, circuits_clean,
-                     constructors_clean
+                     constructors_clean, driver_standings_clean,
+                     constructor_standings_clean
 CASCADE;
 
 
@@ -368,9 +369,12 @@ INSERT INTO nationality_country (nationality, home_country, home_country_2) VALU
     ('Thai', 'Thailand', NULL), ('Uruguayan', 'Uruguay', NULL),
     ('Venezuelan', 'Venezuela', NULL);
 
--- Every listed nationality must exist in the data (catches spelling mismatches).
+-- Every listed nationality should exist in the data (catches spelling mismatches).
 -- Drivers or constructors: 'Hong Kong' is only a constructor nationality; it
 -- is kept so the table is the same as the pandas map.
+-- A WARNING, not an error: the smaller scaled datasets (25pct, 50pct) leave
+-- out some seasons and so some nationalities. A misspelled name still stops
+-- the script below, because its drivers would be left without a home country.
 DO $$
 DECLARE unknown TEXT;
 BEGIN
@@ -379,7 +383,7 @@ BEGIN
     WHERE NOT EXISTS (SELECT 1 FROM drivers d WHERE btrim(d.nationality) = n.nationality)
       AND NOT EXISTS (SELECT 1 FROM constructors c WHERE btrim(c.nationality) = n.nationality);
     IF unknown IS NOT NULL THEN
-        RAISE EXCEPTION 'nationality_country names not in drivers: %', unknown;
+        RAISE WARNING 'nationality_country names not in the data: %', unknown;
     END IF;
 END $$;
 
@@ -474,6 +478,34 @@ END $$;
 
 
 -- ---------------------------------------------------------------------------
+-- 4.13 driver_standings_clean, constructor_standings_clean
+-- ---------------------------------------------------------------------------
+-- Kept unchanged, only checked. The standings are the championship AFTER
+-- each race, so they describe the race result; the features (6.5) use the
+-- standings of the previous race. Constructor standings start in 1958.
+-- The primary key checks one row per driver (team) per race: adding it
+-- fails if there is a duplicate.
+
+CREATE TABLE driver_standings_clean AS
+SELECT * FROM driver_standings ORDER BY raceId, driverId;
+
+ALTER TABLE driver_standings_clean ADD PRIMARY KEY (raceId, driverId);
+
+CREATE TABLE constructor_standings_clean AS
+SELECT * FROM constructor_standings ORDER BY raceId, constructorId;
+
+ALTER TABLE constructor_standings_clean ADD PRIMARY KEY (raceId, constructorId);
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM driver_standings_clean WHERE points < 0 OR wins < 0)
+       OR EXISTS (SELECT 1 FROM constructor_standings_clean WHERE points < 0 OR wins < 0) THEN
+        RAISE EXCEPTION 'standings: negative points or wins';
+    END IF;
+END $$;
+
+
+-- ---------------------------------------------------------------------------
 -- 4.5 Rows and columns match the notebook's cleaned tables
 -- ---------------------------------------------------------------------------
 -- A WARNING, not an error: on the scaled datasets (bench/scale_data.py) the
@@ -494,7 +526,9 @@ BEGIN
         ('results_clean',    24686, 22),
         ('drivers_clean',      861, 13),
         ('circuits_clean',      77,  9),
-        ('constructors_clean', 212,  5)
+        ('constructors_clean', 212,  5),
+        ('driver_standings_clean',      34863, 7),
+        ('constructor_standings_clean', 13391, 7)
     ) AS v(name, nb_rows, nb_cols)
     LOOP
         EXECUTE format('SELECT count(*) FROM %I', t.name) INTO n_rows;
@@ -502,10 +536,10 @@ BEGIN
         WHERE table_schema = current_schema() AND table_name = t.name;
         IF (n_rows, n_cols) = (t.nb_rows, t.nb_cols) THEN
             RAISE NOTICE '% % rows x % cols, same as the notebook',
-                rpad(t.name, 18), n_rows, n_cols;
+                rpad(t.name, 27), n_rows, n_cols;
         ELSE
             RAISE WARNING '% % rows x % cols, notebook has % x %',
-                rpad(t.name, 18), n_rows, n_cols, t.nb_rows, t.nb_cols;
+                rpad(t.name, 27), n_rows, n_cols, t.nb_rows, t.nb_cols;
         END IF;
     END LOOP;
 END $$;

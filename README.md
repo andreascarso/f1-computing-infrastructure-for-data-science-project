@@ -129,6 +129,47 @@ Q1 reads every result row from 1994 on and joins about 85% of them to
 qualifying, so one sequential scan and a hash join beat looking up each row in
 an index. An index helps when a query needs only a few rows.
 
+**Build the features in SQL** (after cleaning):
+
+```bash
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < sql/features.sql
+```
+
+`sql/features.sql` is notebook Section 6 in SQL, with the same logic as
+`impl/python/features.py`. Each step is a table with one row per driver per
+race: `features_grid` holds the base table with both splits (6.1), the grid
+features (6.2) and the qualifying features (6.3); `features_form` the driver
+and constructor form from past races only (6.4), with window functions whose
+frame ends at `1 PRECEDING` (the SQL form of `shift(1)`); `features_standings`
+the championship standings before the race (6.5), taken with `LAG` from the
+previous race of the season in `driver_standings_clean` /
+`constructor_standings_clean`. The script prints the notebook's numbers next to
+its own, checks that no form or standings feature uses the race itself or a
+later one, shows where the standings come from (6.5.1) and prints how long
+`features_form` and `features_standings` take to build. The 6.6 context
+features are not in SQL yet, so the SQL output has 18 of the 22 features.
+
+Form features (6.4) on `data/`, median of 3:
+
+| implementation | time |
+|---|---|
+| pandas A, `transform(lambda ...)` | 1,169 ms |
+| pandas B, vectorised | 60 ms |
+| SQL, window functions (`CREATE TABLE features_form`) | 83 ms |
+
+The SQL time includes writing the table; the pandas times build columns in memory. The feature tables are copies, not views:
+re-running `clean.sql` leaves them out of date, so run `features.sql` again
+after it.
+
+To compare with pandas, write both outputs and diff them (see
+[Output equivalence check](#output-equivalence-check)):
+
+```bash
+docker compose exec -T db sh -c 'psql -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < sql/export_features.sql > bench/outputs/sql.csv
+python impl/python/features.py data/ --out bench/outputs/pandas.csv
+python bench/compare_outputs.py bench/outputs/pandas.csv bench/outputs/sql.csv
+```
+
 **Stop:**
 
 ```bash
