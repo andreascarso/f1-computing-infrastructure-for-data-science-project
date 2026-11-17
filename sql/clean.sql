@@ -369,9 +369,12 @@ INSERT INTO nationality_country (nationality, home_country, home_country_2) VALU
     ('Thai', 'Thailand', NULL), ('Uruguayan', 'Uruguay', NULL),
     ('Venezuelan', 'Venezuela', NULL);
 
--- Every listed nationality must exist in the data (catches spelling mismatches).
+-- Every listed nationality should exist in the data (catches spelling mismatches).
 -- Drivers or constructors: 'Hong Kong' is only a constructor nationality; it
 -- is kept so the table is the same as the pandas map.
+-- A WARNING, not an error: the smaller scaled datasets (25pct, 50pct) leave
+-- out some seasons and so some nationalities. A misspelled name still stops
+-- the script below, because its drivers would be left without a home country.
 DO $$
 DECLARE unknown TEXT;
 BEGIN
@@ -380,7 +383,7 @@ BEGIN
     WHERE NOT EXISTS (SELECT 1 FROM drivers d WHERE btrim(d.nationality) = n.nationality)
       AND NOT EXISTS (SELECT 1 FROM constructors c WHERE btrim(c.nationality) = n.nationality);
     IF unknown IS NOT NULL THEN
-        RAISE EXCEPTION 'nationality_country names not in drivers: %', unknown;
+        RAISE WARNING 'nationality_country names not in the data: %', unknown;
     END IF;
 END $$;
 
