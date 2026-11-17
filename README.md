@@ -140,9 +140,14 @@ docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v O
 race: `features_grid` holds the base table with both splits (6.1), the grid
 features (6.2) and the qualifying features (6.3); `features_form` the driver
 and constructor form from past races only (6.4), with window functions whose
-frame ends at `1 PRECEDING` (the SQL form of `shift(1)`). The script prints the
-notebook's numbers next to its own, checks that no form feature uses the race
-itself or a later one, and prints how long `features_form` takes to build.
+frame ends at `1 PRECEDING` (the SQL form of `shift(1)`); `features_standings`
+the championship standings before the race (6.5), taken with `LAG` from the
+previous race of the season in `driver_standings_clean` /
+`constructor_standings_clean`. The script prints the notebook's numbers next to
+its own, checks that no form or standings feature uses the race itself or a
+later one, shows where the standings come from (6.5.1) and prints how long
+`features_form` and `features_standings` take to build. The 6.6 context
+features are not in SQL yet, so the SQL output has 18 of the 22 features.
 
 Form features (6.4) on `data/`, median of 3:
 

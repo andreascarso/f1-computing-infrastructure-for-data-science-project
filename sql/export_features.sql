@@ -31,8 +31,15 @@ SELECT g.raceId AS "raceId", g.driverId AS "driverId",
        round(f.drv_career_podium_rate, 6)     AS drv_career_podium_rate,
        round(f.drv_circuit_podium_rate, 6)    AS drv_circuit_podium_rate,
        round(f.cons_podiums_last5, 6)         AS cons_podiums_last5,
-       round(f.cons_avg_finish_last5, 6)      AS cons_avg_finish_last5
+       round(f.cons_avg_finish_last5, 6)      AS cons_avg_finish_last5,
+       -- 6.5 pre-race standings
+       round(s.drv_pre_points_share, 6)       AS drv_pre_points_share,
+       s.drv_pre_wins::numeric(20,6)          AS drv_pre_wins,
+       s.drv_pre_position::numeric(20,6)      AS drv_pre_position,
+       round(s.cons_pre_points_share, 6)      AS cons_pre_points_share,
+       s.cons_pre_position::numeric(20,6)     AS cons_pre_position
 FROM features_grid g
-JOIN features_form f USING (raceId, driverId);
+JOIN features_form f      USING (raceId, driverId)
+JOIN features_standings s USING (raceId, driverId);
 
 \copy (SELECT * FROM export_features ORDER BY "raceId", "driverId") TO STDOUT WITH (FORMAT csv, HEADER)

@@ -15,7 +15,7 @@
 
 BEGIN;
 
-DROP TABLE IF EXISTS features_grid, features_form CASCADE;
+DROP TABLE IF EXISTS features_grid, features_form, features_standings CASCADE;
 
 
 -- ---------------------------------------------------------------------------
@@ -214,6 +214,133 @@ END $$;
 
 
 -- ---------------------------------------------------------------------------
+-- 6.5 Pre-race championship standings: features_standings
+-- ---------------------------------------------------------------------------
+-- The standings tables hold the championship AFTER each race, so a race
+-- takes the standings of the driver's (team's) previous standings row in
+-- the same season. LAG(x) OVER season reads x from the row before, like
+-- pandas' shift(1); a self-join to "the previous row" would first need a
+-- row number to join on.
+--   season start: no row before, LAG gives NULL. 0 points and 0 wins is a
+--                 fact (COALESCE), but there is no position yet (stays NULL).
+--   points share: points systems changed over the years, so points are a
+--                 share of the race's leader (0 when the leader has 0 too).
+-- This runs on the standings tables, BEFORE joining the race rows: the
+-- leader is the leader of everyone in the standings, and a race row
+-- without a standings row stays NULL in every column (LEFT JOIN).
+
+\timing on
+
+CREATE TABLE features_standings AS
+WITH drv_pre AS (
+    SELECT s.raceId, s.driverId,
+           COALESCE(lag(s.points) OVER season, 0) AS pre_points,
+           COALESCE(lag(s.wins)   OVER season, 0) AS pre_wins,
+           lag(s.position) OVER season            AS pre_position,
+           lag(ra.date)    OVER season            AS source_date
+    FROM driver_standings_clean s
+    JOIN races_clean ra USING (raceId)
+    WINDOW season AS (PARTITION BY s.driverId, ra.year ORDER BY ra.date, s.raceId)
+),
+drv AS (
+    -- a window can't be nested in another, so the leader is a second step
+    SELECT p.*,
+           CASE WHEN max(pre_points) OVER (PARTITION BY raceId) > 0
+                THEN pre_points / max(pre_points) OVER (PARTITION BY raceId)
+                ELSE 0
+           END AS pre_points_share
+    FROM drv_pre p
+),
+cons_pre AS (
+    SELECT s.raceId, s.constructorId,
+           COALESCE(lag(s.points) OVER season, 0) AS pre_points,
+           lag(s.position) OVER season            AS pre_position,
+           lag(ra.date)    OVER season            AS source_date
+    FROM constructor_standings_clean s
+    JOIN races_clean ra USING (raceId)
+    WINDOW season AS (PARTITION BY s.constructorId, ra.year ORDER BY ra.date, s.raceId)
+),
+cons AS (
+    SELECT p.*,
+           CASE WHEN max(pre_points) OVER (PARTITION BY raceId) > 0
+                THEN pre_points / max(pre_points) OVER (PARTITION BY raceId)
+                ELSE 0
+           END AS pre_points_share
+    FROM cons_pre p
+)
+SELECT g.raceId, g.driverId,
+       d.pre_points_share AS drv_pre_points_share,
+       d.pre_wins         AS drv_pre_wins,
+       d.pre_position     AS drv_pre_position,
+       c.pre_points_share AS cons_pre_points_share,
+       c.pre_position     AS cons_pre_position,
+       d.source_date      AS drv_standings_source_date,
+       c.source_date      AS cons_standings_source_date
+FROM features_grid g
+LEFT JOIN drv d  ON d.raceId = g.raceId AND d.driverId = g.driverId
+-- both drivers of a team get the team's standings
+LEFT JOIN cons c ON c.raceId = g.raceId AND c.constructorId = g.constructorId
+ORDER BY g.raceId, g.driverId;
+
+\timing off
+
+ALTER TABLE features_standings ADD PRIMARY KEY (raceId, driverId);
+
+-- 6.7 leakage check: every standings row used is from before the race
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM features_standings s JOIN features_grid g USING (raceId, driverId)
+               WHERE s.drv_standings_source_date >= g.date
+                  OR s.cons_standings_source_date >= g.date) THEN
+        RAISE EXCEPTION 'features_standings: standings from on or after the race date';
+    END IF;
+END $$;
+
+
+-- 6.5.1 Do the standings come from the immediately previous race? LAG again,
+-- now on races_clean: the previous race of the season. A source older than
+-- that would still be before the race (no leakage) but out of date.
+
+CREATE TEMP TABLE standings_source ON COMMIT DROP AS
+WITH previous_race AS (
+    SELECT raceId, lag(date) OVER (PARTITION BY year ORDER BY date) AS prev_race_date
+    FROM races_clean
+),
+sources AS (
+    SELECT 'drv' AS standings, g.year, p.prev_race_date, s.drv_standings_source_date AS source_date
+    FROM features_standings s
+    JOIN features_grid g USING (raceId, driverId)
+    JOIN previous_race p USING (raceId)
+    UNION ALL
+    SELECT 'cons', g.year, p.prev_race_date, s.cons_standings_source_date
+    FROM features_standings s
+    JOIN features_grid g USING (raceId, driverId)
+    JOIN previous_race p USING (raceId)
+)
+SELECT standings,
+       CASE WHEN year <= 1979 THEN '1950–1979'
+            WHEN year <= 2009 THEN '1980–2009'
+            ELSE                   '2010–2024' END AS period,
+       CASE WHEN prev_race_date IS NULL        THEN 'season start'
+            WHEN source_date IS NULL           THEN 'no earlier standings'
+            WHEN source_date = prev_race_date  THEN 'previous race'
+            WHEN source_date < prev_race_date  THEN 'older race (stale)'
+            ELSE                                    'other' END AS source
+FROM sources;
+
+-- The notebook's two tables (rows per period and source)
+SELECT standings, period,
+       count(*) FILTER (WHERE source = 'no earlier standings') AS "no earlier standings",
+       count(*) FILTER (WHERE source = 'previous race')        AS "previous race",
+       count(*) FILTER (WHERE source = 'season start')         AS "season start",
+       count(*) FILTER (WHERE source NOT IN ('no earlier standings', 'previous race',
+                                             'season start'))  AS "older / other"
+FROM standings_source
+GROUP BY standings, period
+ORDER BY standings DESC, period;
+
+
+-- ---------------------------------------------------------------------------
 -- Key numbers next to the notebook's Section 6
 -- ---------------------------------------------------------------------------
 -- A WARNING, not an error: on the scaled datasets (bench/scale_data.py) they
@@ -269,7 +396,35 @@ BEGIN
             'SELECT round(avg(cons_podiums_last5), 2) FROM features_form', 0.31),
         (22, '6.4 drv_circuit_podium_rate NULL %',
             'SELECT round(100.0 * count(*) FILTER (WHERE drv_circuit_podium_rate IS NULL)
-                     / count(*), 2) FROM features_form', 30.24)
+                     / count(*), 2) FROM features_form', 30.24),
+        (23, '6.5 rows with driver standings',
+            'SELECT count(drv_standings_source_date) FROM features_standings', 21771),
+        (24, '6.5 rows with team standings',
+            'SELECT count(cons_standings_source_date) FROM features_standings', 21770),
+        (25, '6.5 drv_pre_points_share not NULL',
+            'SELECT count(drv_pre_points_share) FROM features_standings', 24261),
+        (26, '6.5 cons_pre_points_share not NULL',
+            'SELECT count(cons_pre_points_share) FROM features_standings', 23355),
+        (27, '6.5 mean drv_pre_points_share',
+            'SELECT round(avg(drv_pre_points_share), 2) FROM features_standings', 0.19),
+        (28, '6.5 mean drv_pre_wins',
+            'SELECT round(avg(drv_pre_wins), 2) FROM features_standings', 0.34),
+        (29, '6.5 mean drv_pre_position',
+            'SELECT round(avg(drv_pre_position), 2) FROM features_standings', 12.85),
+        (30, '6.5 max drv_pre_position',
+            'SELECT max(drv_pre_position) FROM features_standings', 102),
+        (31, '6.5 mean cons_pre_points_share',
+            'SELECT round(avg(cons_pre_points_share), 2) FROM features_standings', 0.28),
+        (32, '6.5 mean cons_pre_position',
+            'SELECT round(avg(cons_pre_position), 2) FROM features_standings', 6.10),
+        (33, '6.5.1 stale driver standings',
+            'SELECT count(*) FROM standings_source
+             WHERE standings = ''drv'' AND source NOT IN
+                   (''season start'', ''no earlier standings'', ''previous race'')', 0),
+        (34, '6.5.1 stale team standings',
+            'SELECT count(*) FROM standings_source
+             WHERE standings = ''cons'' AND source NOT IN
+                   (''season start'', ''no earlier standings'', ''previous race'')', 0)
     ) AS t(i, label, query, notebook)
     ORDER BY i
     LOOP
