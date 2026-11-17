@@ -38,13 +38,183 @@ fn load_tables(data_dir: &Path) -> Result<(HashMap<&'static str, Table>, f64), B
     Ok((tables, total))
 }
 
+/// Lookup from an id (raceId, statusId, ...) to the row with that id. Ids are
+/// small non-negative integers (also in the scaled sets), so a Vec indexed by
+/// the id is the simplest hash table: one memory access.
+struct IdIndex(Vec<Option<usize>>);
+
+impl IdIndex {
+    fn new(t: &Table, column: &str) -> IdIndex {
+        let col = t.col(column);
+        let ids: Vec<usize> = (0..t.nrows()).map(|r| t.req(r, col) as usize).collect();
+        let mut index = vec![None; ids.iter().max().map_or(0, |m| m + 1)];
+        for (row, &id) in ids.iter().enumerate() {
+            assert!(index[id].replace(row).is_none(), "{column}: duplicate id {id}");
+        }
+        IdIndex(index)
+    }
+
+    fn get(&self, id: i64) -> Option<usize> {
+        self.0.get(usize::try_from(id).ok()?).copied().flatten()
+    }
+}
+
+/// "2009-03-29" -> 20090329: sorts like the date, no time library needed
+fn parse_date(s: &str) -> i32 {
+    let parts: Vec<i32> = s.split('-').map(|p| p.parse().expect("bad date")).collect();
+    assert_eq!(parts.len(), 3, "bad date '{s}'");
+    parts[0] * 10000 + parts[1] * 100 + parts[2]
+}
+
+// ---------------------------------------------------------------------------
+// 4.9: results_clean, only the part that 6.4 and Q1 need
+// ---------------------------------------------------------------------------
+
+/// One row of results_clean, joined with its race (circuit, year, date)
+#[allow(dead_code)] // round is kept for parity with the C struct
+struct RaceResult {
+    result_id: i64,
+    race_id: i64,
+    driver_id: i64,
+    constructor_id: i64,
+    circuit_id: i64,
+    year: i32,
+    round: i32,
+    date: i32, // yyyymmdd
+    grid: i64,
+    position_order: i64,
+    podium: i64,
+}
+
+/// 4.8: the status names that mean the car never started the race
+const DID_NOT_START: [&str; 3] = ["Did not qualify", "Did not prequalify", "Withdrew"];
+
+/// Qualifying row by (raceId, driverId), shared by 4.9.4 and Q1
+type QualiIndex = HashMap<(i64, i64), usize>;
+
+fn index_qualifying(quali: &Table) -> QualiIndex {
+    let (c_race, c_driver) = (quali.col("raceId"), quali.col("driverId"));
+    let mut index = HashMap::with_capacity(quali.nrows());
+    for r in 0..quali.nrows() {
+        let key = (quali.req(r, c_race), quali.req(r, c_driver));
+        assert!(index.insert(key, r).is_none(), "qualifying: duplicate {key:?}");
+    }
+    index
+}
+
+fn clean_results(tables: &HashMap<&str, Table>, quali_index: &QualiIndex) -> Vec<RaceResult> {
+    let res = &tables["results"];
+    let races = &tables["races"];
+    let status = &tables["status"];
+    let quali = &tables["qualifying"];
+    let n = res.nrows();
+
+    let (c_result, c_race, c_driver, c_cons, c_number, c_grid, c_order, c_status) = (
+        res.col("resultId"), res.col("raceId"), res.col("driverId"), res.col("constructorId"),
+        res.col("number"), res.col("grid"), res.col("positionOrder"), res.col("statusId"),
+    );
+    let (q_number, q_cons) = (quali.col("number"), quali.col("constructorId"));
+
+    // 4.9.4 One row per driver per race. A driver can have several rows in a
+    // race (shared drives in the 1950s). Keep the row whose car number and
+    // constructor match the driver's qualifying entry, if exactly one row
+    // matches; otherwise the first row in the file. The race result itself is
+    // never used, so the choice does not leak the target.
+    let mut keys: Vec<(i64, i64, usize)> =
+        (0..n).map(|r| (res.req(r, c_race), res.req(r, c_driver), r)).collect();
+    keys.sort_unstable(); // (raceId, driverId, file order)
+
+    let mut chosen = Vec::with_capacity(n);
+    let (mut n_single, mut n_matched, mut n_fallback) = (0, 0, 0);
+    for group in keys.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
+        let (race_id, driver_id, first_row) = group[0];
+        if group.len() == 1 {
+            n_single += 1;
+            chosen.push(first_row);
+            continue;
+        }
+        // An Option is never equal to a missing number: None == None would be,
+        // so missing numbers are filtered out first (NaN != NaN in pandas)
+        let matches: Vec<usize> = match quali_index.get(&(race_id, driver_id)) {
+            None => Vec::new(),
+            Some(&q) => group
+                .iter()
+                .map(|&(_, _, r)| r)
+                .filter(|&r| {
+                    res.int(r, c_number).is_some()
+                        && res.int(r, c_number) == quali.int(q, q_number)
+                        && res.int(r, c_cons) == quali.int(q, q_cons)
+                })
+                .collect(),
+        };
+        if matches.len() == 1 {
+            n_matched += 1;
+            chosen.push(matches[0]);
+        } else {
+            n_fallback += 1;
+            chosen.push(first_row);
+        }
+    }
+    let after_dedup = chosen.len();
+
+    // 4.9.7 Remove non-starters and the Indianapolis 500 (1950-1960, a
+    // separate race with its own field)
+    let status_index = IdIndex::new(status, "statusId");
+    let race_index = IdIndex::new(races, "raceId");
+    let s_name = status.col("status");
+    let (r_name, r_circuit, r_year, r_round, r_date) = (
+        races.col("name"), races.col("circuitId"), races.col("year"), races.col("round"), races.col("date"),
+    );
+
+    let mut out = Vec::with_capacity(after_dedup);
+    let mut after_starters = 0;
+    for r in chosen {
+        let sr = status_index.get(res.req(r, c_status)).expect("unknown statusId");
+        if DID_NOT_START.contains(&status.get(sr, s_name).unwrap_or("")) {
+            continue;
+        }
+        after_starters += 1;
+
+        let race_id = res.req(r, c_race);
+        let rr = race_index.get(race_id).unwrap_or_else(|| panic!("unknown raceId {race_id}"));
+        if races.get(rr, r_name) == Some("Indianapolis 500") {
+            continue;
+        }
+
+        // 4.9.11 Target: a podium is a finishing position of 1-3
+        let position_order = res.req(r, c_order);
+        out.push(RaceResult {
+            result_id: res.req(r, c_result),
+            race_id,
+            driver_id: res.req(r, c_driver),
+            constructor_id: res.req(r, c_cons),
+            circuit_id: races.req(rr, r_circuit),
+            year: races.req(rr, r_year) as i32,
+            round: races.req(rr, r_round) as i32,
+            date: parse_date(races.get(rr, r_date).expect("missing race date")),
+            grid: res.req(r, c_grid),
+            position_order,
+            podium: (1..=3).contains(&position_order) as i64,
+        });
+    }
+
+    println!("results: raw results                  {n:>8} rows");
+    println!(
+        "results: after duplicate resolution   {after_dedup:>8} rows  \
+         ({n_single} single, {n_matched} qualifying match, {n_fallback} fallback)"
+    );
+    println!("results: after removing non-starters  {after_starters:>8} rows");
+    println!("results: after excluding Indy 500     {:>8} rows", out.len());
+    out
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("usage: {} DATA_DIR", args[0]);
         return ExitCode::from(2);
     }
-    let (_tables, t_parse) = match load_tables(Path::new(&args[1])) {
+    let (tables, t_parse) = match load_tables(Path::new(&args[1])) {
         Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("{e}");
@@ -52,6 +222,13 @@ fn main() -> ExitCode {
         }
     };
 
+    let start = Instant::now();
+    let quali_index = index_qualifying(&tables["qualifying"]);
+    let results = clean_results(&tables, &quali_index);
+    let t_clean = start.elapsed().as_secs_f64();
+
     println!("\n{:<22} {t_parse:8.4} s", "parse (Section 2)");
+    println!("{:<22} {t_clean:8.4} s", "clean (4.9)");
+    let _ = results;
     ExitCode::SUCCESS
 }
