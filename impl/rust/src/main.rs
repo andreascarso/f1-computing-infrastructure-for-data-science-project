@@ -5,7 +5,9 @@
 //! Usage:
 //!   cargo build --release --manifest-path impl/rust/Cargo.toml
 //!   impl/rust/target/release/f1 data/
+//!   impl/rust/target/release/f1 data/ --out bench/outputs/rust.csv   # for bench/compare_outputs.py
 
+mod form;
 mod table;
 
 use std::collections::HashMap;
@@ -71,7 +73,7 @@ fn parse_date(s: &str) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// One row of results_clean, joined with its race (circuit, year, date)
-#[allow(dead_code)] // round is kept for parity with the C struct
+#[allow(dead_code)] // result_id, year, round, grid: used by Q1 or kept for parity with the C struct
 struct RaceResult {
     result_id: i64,
     race_id: i64,
@@ -210,11 +212,23 @@ fn clean_results(tables: &HashMap<&str, Table>, quali_index: &QualiIndex) -> Vec
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("usage: {} DATA_DIR", args[0]);
-        return ExitCode::from(2);
+    let (mut data_dir, mut out_path) = (None, None);
+    let mut rest = args.iter().skip(1);
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--out" => out_path = rest.next(),
+            _ if data_dir.is_none() && !arg.starts_with('-') => data_dir = Some(arg),
+            _ => {
+                data_dir = None;
+                break;
+            }
+        }
     }
-    let (tables, t_parse) = match load_tables(Path::new(&args[1])) {
+    let Some(data_dir) = data_dir else {
+        eprintln!("usage: {} DATA_DIR [--out CSV]", args[0]);
+        return ExitCode::from(2);
+    };
+    let (tables, t_parse) = match load_tables(Path::new(data_dir)) {
         Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("{e}");
@@ -227,8 +241,25 @@ fn main() -> ExitCode {
     let results = clean_results(&tables, &quali_index);
     let t_clean = start.elapsed().as_secs_f64();
 
+    let start = Instant::now();
+    let form = form::build_form(&results);
+    let t_form = start.elapsed().as_secs_f64();
+
+    let with_driver_form = form.iter().filter(|f| f.drv_podium_rate_last5.is_some()).count();
+    let with_team_form = form.iter().filter(|f| f.cons_podiums_last5.is_some()).count();
+    println!("6.4 rows with driver form {with_driver_form:>8}");
+    println!("6.4 rows with team form   {with_team_form:>8}");
+
     println!("\n{:<22} {t_parse:8.4} s", "parse (Section 2)");
     println!("{:<22} {t_clean:8.4} s", "clean (4.9)");
-    let _ = results;
+    println!("{:<22} {t_form:8.4} s", "form (6.4)");
+
+    if let Some(path) = out_path {
+        if let Err(e) = form::write_output(Path::new(path), &results, &form) {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("\nWrote {path} (output format for bench/compare_outputs.py)");
+    }
     ExitCode::SUCCESS
 }
