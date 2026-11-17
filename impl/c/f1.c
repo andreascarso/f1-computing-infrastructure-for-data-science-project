@@ -5,6 +5,7 @@
  *   make -C impl/c
  *   impl/c/build/f1 data/
  *   impl/c/build/f1 data/ --out bench/outputs/c.csv   # for bench/compare_outputs.py
+ *   impl/c/build/f1 data/ --q1-out bench/outputs/c_q1.csv
  */
 #include <limits.h>
 #include <math.h>
@@ -461,6 +462,179 @@ static void constructor_form(const Results *res, Form *form)
 }
 
 /* ---------------------------------------------------------------------------
+ * 5.1 Q1: which circuits convert a front-row start into a podium most
+ * often, and did that change after 2014?
+ * ------------------------------------------------------------------------- */
+
+#define Q1_FIRST_YEAR 1994   /* qualifying data starts in 1994 */
+#define Q1_HYBRID_YEAR 2014
+#define MIN_STARTS_Q1 10     /* front-row starts per circuit in EACH era */
+
+static const char *ERAS[2] = {"1994–2013", "2014–2024"};
+static const char *FRONT_ROW_BY[2] = {"grid", "qualifying"};
+
+/* Starts and podiums of front-row starters, per definition, circuit and era.
+ * Circuits are few (77), so a dense array indexed by the circuit's row in
+ * circuits.csv is enough for the GROUP BY. */
+typedef struct {
+    size_t n_circuits;
+    const char **name;        /* circuit name per circuit row */
+    long *starts, *podiums;   /* [definition][circuit][era], flattened */
+} Q1;
+
+static size_t q1_at(const Q1 *q, int def, size_t circuit, int era)
+{
+    return ((size_t)def * q->n_circuits + circuit) * 2 + (size_t)era;
+}
+
+static int q1_kept(const Q1 *q, int def, size_t c)
+{
+    return q->starts[q1_at(q, def, c, 0)] >= MIN_STARTS_Q1 &&
+           q->starts[q1_at(q, def, c, 1)] >= MIN_STARTS_Q1;
+}
+
+static double q1_rate(const Q1 *q, int def, size_t c, int era)
+{
+    size_t i = q1_at(q, def, c, era);
+    /* same operation order as pandas: podiums / starts * 100 */
+    return (double)q->podiums[i] / (double)q->starts[i] * 100;
+}
+
+static Q1 q1(const Tables *tables, const Results *res, const PairMap *quali_by_pair)
+{
+    const CsvTable *circuits = get_table(tables, "circuits");
+    const CsvTable *quali = get_table(tables, "qualifying");
+    IdIndex circuit_ix = id_index(circuits, "circuitId");
+    size_t c_name = csv_col(circuits, "name");
+    size_t q_position = csv_col(quali, "position");
+
+    Q1 q = {circuits->nrows, xmalloc(circuits->nrows * sizeof(char *)), NULL, NULL};
+    for (size_t c = 0; c < q.n_circuits; c++)
+        q.name[c] = csv_get(circuits, c, c_name);
+    size_t cells = 2 * q.n_circuits * 2;
+    q.starts = calloc(cells, sizeof *q.starts);
+    q.podiums = calloc(cells, sizeof *q.podiums);
+
+    for (size_t i = 0; i < res->n; i++) {
+        const Result *r = &res->rows[i];
+        if (r->year < Q1_FIRST_YEAR)
+            continue;
+        int era = r->year >= Q1_HYBRID_YEAR;
+        long c = id_lookup(&circuit_ix, r->circuitId);
+
+        /* Hash join with qualifying on (raceId, driverId): probe the map
+         * built once from qualifying. LEFT JOIN: no qualifying row means
+         * no qualifying position, so not on the front row by qualifying. */
+        long qrow = pairmap_get(quali_by_pair, r->raceId, r->driverId);
+        long quali_position = qrow >= 0 ? csv_long(quali, (size_t)qrow, q_position, -1) : -1;
+
+        int front[2] = {r->grid == 1 || r->grid == 2,
+                        quali_position == 1 || quali_position == 2};
+        for (int def = 0; def < 2; def++)
+            if (front[def]) {
+                q.starts[q1_at(&q, def, (size_t)c, era)]++;
+                q.podiums[q1_at(&q, def, (size_t)c, era)] += r->podium;
+            }
+    }
+    free(circuit_ix.row);
+    return q;
+}
+
+/* Average ranks (ties share the mean of their ranks, like pandas'
+ * rank(method="average")): rank[i] for values[i], 1 = smallest. */
+static void average_ranks(const double *values, double *rank, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        size_t below = 0, equal = 0;
+        for (size_t j = 0; j < n; j++) {
+            below += values[j] < values[i];
+            equal += values[j] == values[i];
+        }
+        /* the tied block takes ranks below+1 .. below+equal */
+        rank[i] = (double)below + (double)(equal + 1) / 2.0;
+    }
+}
+
+/* Spearman correlation of the circuits' rates between the two eras
+ * (1 = same ranking): the Pearson correlation of the average ranks. */
+static double q1_rank_correlation(const Q1 *q, int def, size_t *n_kept)
+{
+    double *before = xmalloc(q->n_circuits * sizeof *before);
+    double *after = xmalloc(q->n_circuits * sizeof *after);
+    size_t n = 0;
+    for (size_t c = 0; c < q->n_circuits; c++)
+        if (q1_kept(q, def, c)) {
+            before[n] = q1_rate(q, def, c, 0);
+            after[n] = q1_rate(q, def, c, 1);
+            n++;
+        }
+    double *rb = xmalloc((n ? n : 1) * sizeof *rb), *ra = xmalloc((n ? n : 1) * sizeof *ra);
+    average_ranks(before, rb, n);
+    average_ranks(after, ra, n);
+
+    double mb = 0, ma = 0;
+    for (size_t i = 0; i < n; i++) {
+        mb += rb[i];
+        ma += ra[i];
+    }
+    mb /= (double)n;
+    ma /= (double)n;
+    double sab = 0, saa = 0, sbb = 0;
+    for (size_t i = 0; i < n; i++) {
+        sab += (rb[i] - mb) * (ra[i] - ma);
+        sbb += (rb[i] - mb) * (rb[i] - mb);
+        saa += (ra[i] - ma) * (ra[i] - ma);
+    }
+    free(before);
+    free(after);
+    free(rb);
+    free(ra);
+    *n_kept = n;
+    return sab / sqrt(sbb * saa);
+}
+
+/* Q1 in the long format of impl/python/questions.py --out (q1.csv):
+ * front_row_by, circuit, era, starts, podiums, rate; sorted by
+ * (front_row_by, circuit, era). Rates with 6 decimals. */
+static const Q1 *g_sort_q1;
+
+static int cmp_circuit_name(const void *pa, const void *pb)
+{
+    /* strcmp on UTF-8 bytes sorts like Python's str comparison */
+    return strcmp(g_sort_q1->name[*(const size_t *)pa], g_sort_q1->name[*(const size_t *)pb]);
+}
+
+static void write_q1(const char *path, const Q1 *q)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "%s: cannot write\n", path);
+        exit(1);
+    }
+    size_t *order = xmalloc(q->n_circuits * sizeof *order);
+    for (size_t c = 0; c < q->n_circuits; c++)
+        order[c] = c;
+    g_sort_q1 = q;
+    qsort(order, q->n_circuits, sizeof *order, cmp_circuit_name);
+
+    fputs("front_row_by,circuit,era,starts,podiums,rate\n", f);
+    for (int def = 0; def < 2; def++)
+        for (size_t k = 0; k < q->n_circuits; k++) {
+            size_t c = order[k];
+            if (!q1_kept(q, def, c))
+                continue;
+            for (int era = 0; era < 2; era++) {
+                size_t i = q1_at(q, def, c, era);
+                /* circuit names contain no comma or quote, so no CSV quoting */
+                fprintf(f, "%s,%s,%s,%ld,%ld,%.6f\n", FRONT_ROW_BY[def], q->name[c],
+                        ERAS[era], q->starts[i], q->podiums[i], q1_rate(q, def, c, era));
+            }
+        }
+    free(order);
+    fclose(f);
+}
+
+/* ---------------------------------------------------------------------------
  * Output in the shared format (README, "Output equivalence check")
  * ------------------------------------------------------------------------- */
 
@@ -520,17 +694,19 @@ static void write_output(const char *path, const Results *res, const Form *form)
 
 int main(int argc, char **argv)
 {
-    const char *data_dir = NULL, *out_path = NULL;
+    const char *data_dir = NULL, *out_path = NULL, *q1_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--out") == 0 && i + 1 < argc)
             out_path = argv[++i];
+        else if (strcmp(argv[i], "--q1-out") == 0 && i + 1 < argc)
+            q1_path = argv[++i];
         else if (!data_dir && argv[i][0] != '-')
             data_dir = argv[i];
         else
             data_dir = NULL, i = argc;   /* unknown option: print usage */
     }
     if (!data_dir) {
-        fprintf(stderr, "usage: %s DATA_DIR [--out CSV]\n", argv[0]);
+        fprintf(stderr, "usage: %s DATA_DIR [--out CSV] [--q1-out CSV]\n", argv[0]);
         return 2;
     }
     Tables tables;
@@ -555,15 +731,35 @@ int main(int argc, char **argv)
     printf("6.4 rows with driver form %8zu\n", with_driver_form);
     printf("6.4 rows with team form   %8zu\n", with_team_form);
 
+    start = now();
+    Q1 answer = q1(&tables, &results, &quali_by_pair);
+    double t_q1 = now() - start;
+
+    for (int def = 0; def < 2; def++) {
+        size_t n_kept;
+        double corr = q1_rank_correlation(&answer, def, &n_kept);
+        printf("Q1 by %-10s %2zu circuits, rank correlation between eras %+.2f\n",
+               FRONT_ROW_BY[def], n_kept, corr);
+    }
+
     printf("\n%-22s %8.4f s\n", "parse (Section 2)", t_parse);
     printf("%-22s %8.4f s\n", "clean (4.9)", t_clean);
     printf("%-22s %8.4f s\n", "form (6.4)", t_form);
+    printf("%-22s %8.4f s\n", "Q1 (5.1)", t_q1);
+    printf("%-22s %8.4f s\n", "compute total", t_clean + t_form + t_q1);
 
     if (out_path) {
         write_output(out_path, &results, form);
         printf("\nWrote %s (output format for bench/compare_outputs.py)\n", out_path);
     }
+    if (q1_path) {
+        write_q1(q1_path, &answer);
+        printf("Wrote %s (same layout as q1.csv from impl/python/questions.py --out)\n", q1_path);
+    }
 
+    free(answer.name);
+    free(answer.starts);
+    free(answer.podiums);
     free(form);
     free(results.rows);
     pairmap_free(&quali_by_pair);
