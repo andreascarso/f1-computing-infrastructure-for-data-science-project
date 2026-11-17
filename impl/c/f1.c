@@ -4,8 +4,10 @@
  * Usage:
  *   make -C impl/c
  *   impl/c/build/f1 data/
+ *   impl/c/build/f1 data/ --out bench/outputs/c.csv   # for bench/compare_outputs.py
  */
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -294,23 +296,275 @@ static PairMap index_qualifying(const Tables *tables)
     return m;
 }
 
+/* ---------------------------------------------------------------------------
+ * 6.4: driver and constructor form, from past races only
+ * ------------------------------------------------------------------------- */
+
+/* "Last 5 races", as FORM_WINDOW in impl/python/features.py */
+#define FORM_WINDOW 5
+
+/* The 6.4 features of one results row. NAN = no past race (empty in the CSV). */
+typedef struct {
+    double drv_prev_races;
+    double drv_podium_rate_last5;
+    double drv_avg_finish_last5;
+    double drv_career_podium_rate;
+    double drv_circuit_podium_rate;
+    double cons_podiums_last5;
+    double cons_avg_finish_last5;
+} Form;
+
+/* Mean of the last (up to) FORM_WINDOW values of one group, kept as a
+ * sliding sum: each new value is added and the value that leaves the
+ * window is subtracted, so every step is O(1) instead of re-adding 5
+ * values. This is pandas' shift(1).rolling(5, min_periods=1).mean(): the
+ * window holds only past values, and the mean is NAN before the first one. */
+typedef struct {
+    double values[FORM_WINDOW];
+    double sum;
+    int count;     /* values in the window, at most FORM_WINDOW */
+    int next;      /* ring-buffer slot the next value goes into */
+} Window;
+
+static double window_mean(const Window *w)
+{
+    return w->count ? w->sum / w->count : NAN;
+}
+
+static void window_push(Window *w, double v)
+{
+    if (w->count == FORM_WINDOW)
+        w->sum -= w->values[w->next];   /* the oldest value leaves */
+    else
+        w->count++;
+    w->values[w->next] = v;
+    w->sum += v;
+    w->next = (w->next + 1) % FORM_WINDOW;
+}
+
+/* Sort row indices by (group id, date, raceId): the order in which a
+ * group's races happened. `group` is the driverId or constructorId. */
+typedef struct {
+    long group, raceId;
+    int date;
+    size_t row;
+} TimeKey;
+
+static int cmp_timekey(const void *pa, const void *pb)
+{
+    const TimeKey *a = pa, *b = pb;
+    if (a->group != b->group)
+        return a->group < b->group ? -1 : 1;
+    if (a->date != b->date)
+        return a->date < b->date ? -1 : 1;
+    if (a->raceId != b->raceId)
+        return a->raceId < b->raceId ? -1 : 1;
+    return a->row < b->row ? -1 : a->row > b->row;
+}
+
+/* Driver form: one pass over the rows sorted by (driverId, date). */
+static void driver_form(const Results *res, Form *form)
+{
+    size_t n = res->n;
+    TimeKey *keys = xmalloc(n * sizeof *keys);
+    for (size_t i = 0; i < n; i++)
+        keys[i] = (TimeKey){res->rows[i].driverId, res->rows[i].raceId, res->rows[i].date, i};
+    qsort(keys, n, sizeof *keys, cmp_timekey);
+
+    /* (driverId, circuitId) -> slot in circuit_podiums / circuit_races:
+     * a driver's record at one circuit, over the whole career */
+    PairMap circuit_slot = pairmap_new(n);
+    long *circuit_podiums = xmalloc(n * sizeof *circuit_podiums);
+    long *circuit_races = xmalloc(n * sizeof *circuit_races);
+    size_t n_slots = 0;
+
+    Window podiums = {0}, finishes = {0};
+    long career_races = 0, career_podiums = 0;
+    for (size_t k = 0; k < n; k++) {
+        const Result *r = &res->rows[keys[k].row];
+        Form *f = &form[keys[k].row];
+        if (k == 0 || keys[k].group != keys[k - 1].group) {
+            /* a new driver: start from no history */
+            podiums = (Window){0};
+            finishes = (Window){0};
+            career_races = career_podiums = 0;
+        }
+
+        /* features first, from the races before this one ... */
+        f->drv_prev_races = (double)career_races;
+        f->drv_podium_rate_last5 = window_mean(&podiums);
+        f->drv_avg_finish_last5 = window_mean(&finishes);
+        f->drv_career_podium_rate =
+            career_races ? (double)career_podiums / (double)career_races : NAN;
+
+        long slot = pairmap_get(&circuit_slot, r->driverId, r->circuitId);
+        if (slot < 0) {
+            slot = (long)n_slots++;
+            pairmap_put(&circuit_slot, r->driverId, r->circuitId, slot);
+            circuit_podiums[slot] = circuit_races[slot] = 0;
+        }
+        f->drv_circuit_podium_rate = circuit_races[slot]
+            ? (double)circuit_podiums[slot] / (double)circuit_races[slot] : NAN;
+
+        /* ... then add this race to the history (the shift(1) of pandas) */
+        window_push(&podiums, r->podium);
+        window_push(&finishes, r->positionOrder);
+        career_races++;
+        career_podiums += r->podium;
+        circuit_races[slot]++;
+        circuit_podiums[slot] += r->podium;
+    }
+    free(keys);
+    free(circuit_podiums);
+    free(circuit_races);
+    pairmap_free(&circuit_slot);
+}
+
+/* Constructor form: first one entry per team per race (podiums of both
+ * cars, mean finish of the team's cars), then the same sliding window over
+ * each team's races. Every car of the team gets its team's value. */
+static void constructor_form(const Results *res, Form *form)
+{
+    size_t n = res->n;
+    TimeKey *keys = xmalloc(n * sizeof *keys);
+    for (size_t i = 0; i < n; i++)
+        keys[i] = (TimeKey){res->rows[i].constructorId, res->rows[i].raceId, res->rows[i].date, i};
+    qsort(keys, n, sizeof *keys, cmp_timekey);
+
+    Window podiums = {0}, finishes = {0};
+    for (size_t a = 0; a < n;) {
+        /* rows a..b-1: one team in one race */
+        size_t b = a;
+        long podium_sum = 0, finish_sum = 0;
+        while (b < n && keys[b].group == keys[a].group && keys[b].raceId == keys[a].raceId) {
+            podium_sum += res->rows[keys[b].row].podium;
+            finish_sum += res->rows[keys[b].row].positionOrder;
+            b++;
+        }
+        if (a == 0 || keys[a].group != keys[a - 1].group) {
+            podiums = (Window){0};
+            finishes = (Window){0};
+        }
+
+        double podiums_last5 = window_mean(&podiums);
+        double finish_last5 = window_mean(&finishes);
+        for (size_t k = a; k < b; k++) {
+            form[keys[k].row].cons_podiums_last5 = podiums_last5;
+            form[keys[k].row].cons_avg_finish_last5 = finish_last5;
+        }
+
+        window_push(&podiums, (double)podium_sum);
+        window_push(&finishes, (double)finish_sum / (double)(b - a));
+        a = b;
+    }
+    free(keys);
+}
+
+/* ---------------------------------------------------------------------------
+ * Output in the shared format (README, "Output equivalence check")
+ * ------------------------------------------------------------------------- */
+
+/* Sort by (raceId, driverId) for the output */
+static const Results *g_sort_results;
+
+static int cmp_output(const void *pa, const void *pb)
+{
+    const Result *a = &g_sort_results->rows[*(const size_t *)pa];
+    const Result *b = &g_sort_results->rows[*(const size_t *)pb];
+    if (a->raceId != b->raceId)
+        return a->raceId < b->raceId ? -1 : 1;
+    return (a->driverId > b->driverId) - (a->driverId < b->driverId);
+}
+
+static void write_value(FILE *f, double v)
+{
+    if (isnan(v))
+        fputs(",", f);            /* NULL / NaN: an empty field */
+    else
+        fprintf(f, ",%.6f", v);
+}
+
+static void write_output(const char *path, const Results *res, const Form *form)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "%s: cannot write\n", path);
+        exit(1);
+    }
+    size_t *order = xmalloc(res->n * sizeof *order);
+    for (size_t i = 0; i < res->n; i++)
+        order[i] = i;
+    g_sort_results = res;
+    qsort(order, res->n, sizeof *order, cmp_output);
+
+    /* the 6.4 columns, in the canonical order of bench/compare_outputs.py */
+    fputs("raceId,driverId,drv_prev_races,drv_podium_rate_last5,drv_avg_finish_last5,"
+          "drv_career_podium_rate,drv_circuit_podium_rate,cons_podiums_last5,"
+          "cons_avg_finish_last5\n", f);
+    for (size_t k = 0; k < res->n; k++) {
+        const Result *r = &res->rows[order[k]];
+        const Form *x = &form[order[k]];
+        fprintf(f, "%ld,%ld", r->raceId, r->driverId);
+        write_value(f, x->drv_prev_races);
+        write_value(f, x->drv_podium_rate_last5);
+        write_value(f, x->drv_avg_finish_last5);
+        write_value(f, x->drv_career_podium_rate);
+        write_value(f, x->drv_circuit_podium_rate);
+        write_value(f, x->cons_podiums_last5);
+        write_value(f, x->cons_avg_finish_last5);
+        fputc('\n', f);
+    }
+    free(order);
+    fclose(f);
+}
+
 int main(int argc, char **argv)
 {
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s DATA_DIR\n", argv[0]);
+    const char *data_dir = NULL, *out_path = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--out") == 0 && i + 1 < argc)
+            out_path = argv[++i];
+        else if (!data_dir && argv[i][0] != '-')
+            data_dir = argv[i];
+        else
+            data_dir = NULL, i = argc;   /* unknown option: print usage */
+    }
+    if (!data_dir) {
+        fprintf(stderr, "usage: %s DATA_DIR [--out CSV]\n", argv[0]);
         return 2;
     }
     Tables tables;
-    double t_parse = load_tables(argv[1], &tables);
+    double t_parse = load_tables(data_dir, &tables);
 
     double start = now();
     PairMap quali_by_pair = index_qualifying(&tables);
     Results results = clean_results(&tables, &quali_by_pair);
     double t_clean = now() - start;
 
+    start = now();
+    Form *form = xmalloc(results.n * sizeof *form);
+    driver_form(&results, form);
+    constructor_form(&results, form);
+    double t_form = now() - start;
+
+    size_t with_driver_form = 0, with_team_form = 0;
+    for (size_t i = 0; i < results.n; i++) {
+        with_driver_form += !isnan(form[i].drv_podium_rate_last5);
+        with_team_form += !isnan(form[i].cons_podiums_last5);
+    }
+    printf("6.4 rows with driver form %8zu\n", with_driver_form);
+    printf("6.4 rows with team form   %8zu\n", with_team_form);
+
     printf("\n%-22s %8.4f s\n", "parse (Section 2)", t_parse);
     printf("%-22s %8.4f s\n", "clean (4.9)", t_clean);
+    printf("%-22s %8.4f s\n", "form (6.4)", t_form);
 
+    if (out_path) {
+        write_output(out_path, &results, form);
+        printf("\nWrote %s (output format for bench/compare_outputs.py)\n", out_path);
+    }
+
+    free(form);
     free(results.rows);
     pairmap_free(&quali_by_pair);
     for (size_t i = 0; i < N_TABLES; i++)
