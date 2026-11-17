@@ -265,6 +265,79 @@ only in one file, values not written with 6 decimals, and the first differing
 rows (`--max-rows N`). It exits with 0 on a match and 1 otherwise. Files in
 `bench/outputs/` are generated and not committed.
 
+## C port
+
+`impl/c/` does notebook Section 2 (load), the results cleaning that 6.4 needs
+(4.9), the driver/constructor form (6.4) and Q1 (5.1) in plain C11. It uses no
+external libraries, only the C standard library and POSIX `clock_gettime`.
+
+**Requirements:** a C compiler and `make` (macOS: `xcode-select --install`;
+Linux: `gcc`, `make`).
+
+**Build and run:**
+
+```bash
+make -C impl/c                                  # -O2, writes impl/c/build/f1
+impl/c/build/f1 data/                           # prints row counts, Q1 and timings
+impl/c/build/f1 data/ --out bench/outputs/c.csv --q1-out bench/outputs/c_q1.csv
+python bench/compare_outputs.py bench/outputs/pandas.csv bench/outputs/c.csv
+```
+
+| file | what it does |
+|---|---|
+| `csv.c`, `csv.h` | CSV parser: reads a file into one buffer and splits the fields in place; quoted fields with `""` escapes; `\N` and empty fields become NULL |
+| `pairmap.h` | hash map from an id pair, e.g. (raceId, driverId), to a row (open addressing) |
+| `f1.c` | load, cleaning, form, Q1, output and timing |
+
+**How it works:**
+
+- **Cleaning (4.9):** sort the results by (raceId, driverId) and keep one row
+  per pair (the unique qualifying match, else the first row in the file), then
+  drop non-starters and the Indianapolis 500. Row counts are the notebook's:
+  26759 → 26668 → 25067 → 24686.
+- **Form (6.4):** sort the rows by (driverId, date) and walk through each
+  driver's races once. The last 5 races sit in a ring buffer with a running
+  sum: the new race is added, the oldest is subtracted. So each row costs O(1)
+  and the whole pass is O(n) after the sort. The features of a race are read
+  before the race is added, which is the `shift(1)` of pandas. Circuit history
+  is kept per (driverId, circuitId) in the hash map. For the constructor form,
+  the rows are first grouped into one entry per team per race.
+- **Q1 (5.1):** a hash join. Qualifying is put into the hash map once, keyed by
+  (raceId, driverId), and each results row from 1994 on looks up its
+  qualifying position there (a LEFT JOIN: no entry means not on the front row).
+  The starts and podiums are then counted per circuit and era.
+
+**Checked:** `compare_outputs.py` gives MATCH against pandas, also with
+`--tol 0`, and against SQL, on the 7 form columns (24,686 rows); also MATCH
+against pandas on `x10`. The `--q1-out` table equals `q1.csv` from
+`impl/python/questions.py --out` (58 rows, rates within 1e-6, since C writes
+them with 6 decimals). Rank correlations: −0.07 (grid) and +0.20 (qualifying),
+as in the notebook.
+
+**Timing** (median of 3, MacBook Air M-series; pandas: `load.py`,
+`features.py --repeat 3`, `questions.py`):
+
+| step | data | C | pandas B (vectorised) | pandas A (lambda) |
+|---|---|---|---|---|
+| parse / load 14 tables | `data/` | 19 ms | 34 ms | |
+| form (6.4) | `data/` | 3.5 ms | 46 ms | 796 ms |
+| Q1 (5.1) | `data/` | 0.4 ms | 8.8 ms | |
+| parse / load 14 tables | `x10` | 201 ms | 224 ms | |
+| form (6.4) | `x10` | 43 ms | 427 ms | 8,428 ms |
+| Q1 (5.1) | `x10` | 2.6 ms | 35 ms | |
+
+The C cleaning step takes 4.9 ms (`data/`) and 48 ms (`x10`); pandas cleans
+all 14 tables in one step, so there is no matching pandas number.
+
+Loading is almost as fast in pandas as in C, because `read_csv` is itself
+written in C. The form step is 10–13 times faster in C than vectorised pandas:
+pandas builds a new column (a full pass over memory) for every
+`groupby`/`shift`/`rolling` call, while C computes all seven features in two
+passes over compact structs. C time grows about 10× from `data/` to `x10`, as
+an O(n) pass should (the sorts are O(n log n), which is close at this size).
+On `x10`, Q1 keeps 21 circuits instead of 14–15: every count is 10 times
+larger, so more circuits reach the minimum of 10 front-row starts.
+
 ## Rust port
 
 `impl/rust/` does the same work as the C port (`impl/c/`) with the same
