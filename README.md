@@ -138,8 +138,21 @@ docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v O
 `sql/features.sql` is notebook Section 6 in SQL, with the same logic as
 `impl/python/features.py`. Each step is a table with one row per driver per
 race: `features_grid` holds the base table with both splits (6.1), the grid
-features (6.2) and the qualifying features (6.3). The script prints the
-notebook's numbers next to its own. The feature tables are copies, not views:
+features (6.2) and the qualifying features (6.3); `features_form` the driver
+and constructor form from past races only (6.4), with window functions whose
+frame ends at `1 PRECEDING` (the SQL form of `shift(1)`). The script prints the
+notebook's numbers next to its own, checks that no form feature uses the race
+itself or a later one, and prints how long `features_form` takes to build.
+
+Form features (6.4) on `data/`, median of 3:
+
+| implementation | time |
+|---|---|
+| pandas A, `transform(lambda ...)` | 1,169 ms |
+| pandas B, vectorised | 60 ms |
+| SQL, window functions (`CREATE TABLE features_form`) | 83 ms |
+
+The SQL time includes writing the table; the pandas times build columns in memory. The feature tables are copies, not views:
 re-running `clean.sql` leaves them out of date, so run `features.sql` again
 after it.
 

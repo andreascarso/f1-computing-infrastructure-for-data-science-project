@@ -15,7 +15,7 @@
 
 BEGIN;
 
-DROP TABLE IF EXISTS features_grid CASCADE;
+DROP TABLE IF EXISTS features_grid, features_form CASCADE;
 
 
 -- ---------------------------------------------------------------------------
@@ -128,6 +128,92 @@ END $$;
 
 
 -- ---------------------------------------------------------------------------
+-- 6.4 Driver and constructor form, past races only: features_form
+-- ---------------------------------------------------------------------------
+-- Form = how the driver or team did in their previous races. pandas sorts by
+-- date and uses shift(1), so a race only sees earlier races. In SQL the
+-- window frame does the same: it ends at 1 PRECEDING, the row before the
+-- current one, so a race never sees its own result (no leakage).
+--   last 5 races   ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+--                  = shift(1).rolling(5, min_periods=1).mean()
+--   whole career   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+--                  = shift(1).expanding().mean()
+-- On a driver's first race the frame is empty: avg() gives NULL (pandas'
+-- NaN) and count() gives 0 (pandas' cumcount()). ORDER BY date, raceId:
+-- raceId only breaks ties, no driver races twice on one date.
+--
+-- Constructor form first makes one row per team per race (its podiums and
+-- its average finish), then runs the same 5-race window over those rows.
+-- The *_source_date columns hold the date of the previous race used, for
+-- the leakage check below.
+
+\timing on
+
+CREATE TABLE features_form AS
+WITH driver_form AS (
+    SELECT raceId, driverId, constructorId,
+           count(*)           OVER drv_career AS drv_prev_races,
+           avg(podium)        OVER drv_last5  AS drv_podium_rate_last5,
+           avg(positionOrder) OVER drv_last5  AS drv_avg_finish_last5,
+           avg(podium)        OVER drv_career AS drv_career_podium_rate,
+           -- the same frame, but per driver AND circuit
+           avg(podium) OVER (PARTITION BY driverId, circuitId ORDER BY date, raceId
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+               AS drv_circuit_podium_rate,
+           lag(date) OVER (PARTITION BY driverId ORDER BY date, raceId)
+               AS drv_form_source_date
+    FROM features_grid
+    -- named windows: written once, used by several features (and sorted once)
+    WINDOW drv_last5  AS (PARTITION BY driverId ORDER BY date, raceId
+                          ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING),
+           drv_career AS (PARTITION BY driverId ORDER BY date, raceId
+                          ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+),
+team_races AS (
+    -- one row per team per race
+    SELECT constructorId, raceId, date,
+           sum(podium)        AS team_podiums,
+           avg(positionOrder) AS team_avg_finish
+    FROM features_grid
+    GROUP BY constructorId, raceId, date
+),
+team_form AS (
+    SELECT constructorId, raceId,
+           avg(team_podiums)    OVER team_last5 AS cons_podiums_last5,
+           avg(team_avg_finish) OVER team_last5 AS cons_avg_finish_last5,
+           lag(date) OVER (PARTITION BY constructorId ORDER BY date, raceId)
+               AS cons_form_source_date
+    FROM team_races
+    WINDOW team_last5 AS (PARTITION BY constructorId ORDER BY date, raceId
+                          ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING)
+)
+SELECT d.raceId, d.driverId,
+       d.drv_prev_races, d.drv_podium_rate_last5, d.drv_avg_finish_last5,
+       d.drv_career_podium_rate, d.drv_circuit_podium_rate,
+       t.cons_podiums_last5, t.cons_avg_finish_last5,
+       d.drv_form_source_date, t.cons_form_source_date
+FROM driver_form d
+JOIN team_form t USING (constructorId, raceId)
+ORDER BY d.raceId, d.driverId;
+
+\timing off
+
+ALTER TABLE features_form ADD PRIMARY KEY (raceId, driverId);
+
+-- 6.7 leakage check: every past race used is strictly before the race
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM features_form f JOIN features_grid g USING (raceId, driverId)
+               WHERE f.drv_form_source_date >= g.date OR f.cons_form_source_date >= g.date) THEN
+        RAISE EXCEPTION 'features_form: a form feature uses a race on or after the race date';
+    END IF;
+    IF (SELECT count(*) FROM features_form) <> (SELECT count(*) FROM features_grid) THEN
+        RAISE EXCEPTION 'features_form: not one row per features_grid row';
+    END IF;
+END $$;
+
+
+-- ---------------------------------------------------------------------------
 -- Key numbers next to the notebook's Section 6
 -- ---------------------------------------------------------------------------
 -- A WARNING, not an error: on the scaled datasets (bench/scale_data.py) they
@@ -164,7 +250,26 @@ BEGIN
         (12, '6.3   of which from 1994 on',
             'SELECT count(*) FROM features_grid WHERE has_qualifying = 0 AND year >= 1994', 1824),
         (13, '6.3 rows without quali gap',
-            'SELECT count(*) FROM features_grid WHERE quali_gap_pct IS NULL', 14390)
+            'SELECT count(*) FROM features_grid WHERE quali_gap_pct IS NULL', 14390),
+        (14, '6.4 rows with driver form',
+            'SELECT count(drv_form_source_date) FROM features_form', 24000),
+        (15, '6.4 rows with team form',
+            'SELECT count(cons_form_source_date) FROM features_form', 24421),
+        (16, '6.4 max drv_prev_races',
+            'SELECT max(drv_prev_races) FROM features_form', 401),
+        (17, '6.4 mean drv_prev_races',
+            'SELECT round(avg(drv_prev_races), 2) FROM features_form', 68.09),
+        (18, '6.4 mean drv_podium_rate_last5',
+            'SELECT round(avg(drv_podium_rate_last5), 2) FROM features_form', 0.14),
+        (19, '6.4 mean drv_avg_finish_last5',
+            'SELECT round(avg(drv_avg_finish_last5), 2) FROM features_form', 11.69),
+        (20, '6.4 mean drv_career_podium_rate',
+            'SELECT round(avg(drv_career_podium_rate), 2) FROM features_form', 0.12),
+        (21, '6.4 mean cons_podiums_last5',
+            'SELECT round(avg(cons_podiums_last5), 2) FROM features_form', 0.31),
+        (22, '6.4 drv_circuit_podium_rate NULL %',
+            'SELECT round(100.0 * count(*) FILTER (WHERE drv_circuit_podium_rate IS NULL)
+                     / count(*), 2) FROM features_form', 30.24)
     ) AS t(i, label, query, notebook)
     ORDER BY i
     LOOP
