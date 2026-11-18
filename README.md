@@ -66,7 +66,7 @@ questions (notebook Section 5):
 | step | notebook | pandas | SQL | C, Rust, R |
 |---|---|---|---|---|
 | load the 14 CSVs | 2 | `read_csv` | `COPY` (loader container) | own CSV reading |
-| clean | 4 | all tables | all tables | only `results`, as 6.4 needs it |
+| clean | 4 | all 14 tables | the 11 tables the questions and features use | only `results`, as 6.4 needs it |
 | features | 6 | all 22, in two versions: `transform(lambda)` and vectorised | 18 of 22, window functions | only form (6.4): 7 features |
 | Q1–Q3 | 5 | all three | all three, as views | Q1 only |
 
@@ -94,6 +94,105 @@ All runs are on one laptop, with its CPU and Docker resources stored next to
 every number. `bench/benchmark.py` does the measuring and writes everything to
 the `benchmark_results` table.
 
+
+## Scope: which notebook sections run where
+
+pandas and SQL are the **core**: the whole data part of the notebook. C, Rust
+and R are **ports** of one slice of it: the CSV loading, the rolling form
+(6.4) and Q1. Form is a loop over each driver's past races; written as a
+per-group `transform(lambda)` in pandas it takes 1.16 s on `data/`, against
+56 ms vectorised, so it shows best what the choice of tool changes. Sections 7
+onwards (the models) stay in the notebook.
+
+| notebook section | pandas (core) | SQL (core) | C (port) | Rust (port) | R (port) |
+|---|---|---|---|---|---|
+| 2 load the 14 CSVs | ✓ [#16](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/16) | ✓ `COPY` [#6](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/6) [#7](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/7) | ✓ [#26](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/26) | ✓ [#27](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/27) | ✓ [#25](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/25) |
+| 4.2–4.8 dates, times in seconds, status categories | ✓ [#17](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/17) | ✓ [#8](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/8) | – | – | – |
+| 4.9 `results_clean` (one row per driver and race) | ✓ [#17](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/17) | ✓ [#9](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/9) | ✓ | ✓ | ✓ |
+| 4.10–4.17 the other tables | ✓ [#17](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/17) | 4.11, 4.13, 4.15, 4.16 (not constructor_results, sprint_results, seasons) [#8](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/8) | – | – | – |
+| 5.1 Q1 front row → podium | ✓ [#18](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/18) | ✓ [#10](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/10) | ✓ | ✓ | ✓ |
+| 5.2 Q2 home podium rate | ✓ [#18](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/18) | ✓ [#11](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/11) | – | – | – |
+| 5.3 Q3 mechanical retirements | ✓ [#18](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/18) | ✓ [#12](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/12) | – | – | – |
+| 6.1–6.3 base table, grid, qualifying | ✓ [#19](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/19) | ✓ [#13](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/13) | – | – | – |
+| 6.4 driver and constructor form | ✓ two versions [#19](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/19) | ✓ window functions [#14](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/14) | ✓ | ✓ | ✓ |
+| 6.5 pre-race standings | ✓ [#19](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/19) | ✓ [#15](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/15) | – | – | – |
+| 6.6 context features | ✓ [#19](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/19) | – | – | – | – |
+| 6.7 leakage check | ✓ | ✓ | – | – | ✓ |
+
+Around them: the output check [#20](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/20), the scaled datasets [#22](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/22), the
+benchmark harness [#21](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/21) and its image [#28](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/28), and the dashboard [#23](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/23).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    csv[("data/*.csv<br/>14 files, or a scaled copy")]
+    subgraph compose["docker compose"]
+        loader["loader<br/>Python + psycopg<br/>(one-off job)"]
+        db[("db<br/>PostgreSQL 16<br/>volume dbdata")]
+        bench["bench<br/>pandas · C · Rust · R"]
+        app["app<br/>Streamlit"]
+    end
+    harness["bench/benchmark.py<br/>on the laptop"]
+    browser(["browser"])
+
+    csv -- "CSV, read-only mount" --> loader
+    loader -- "COPY: rows" --> db
+    csv -- "CSV, read-only mount" --> bench
+    db -- "SQL: Q1–Q3 views,<br/>benchmark_results" --> app
+    app -- ":8501" --> browser
+    harness -. "docker exec,<br/>docker stats" .-> bench
+    harness -. "runs loader, psql;<br/>COPY results" .-> db
+
+    style compose stroke-dasharray: 6 4
+```
+
+- **db** is the only service that keeps state. `docker compose up -d` starts
+  it and the **app**, which connects with `host=db` and is published on port
+  8501.
+- **loader** runs once per load (`docker compose run --rm loader`): it copies
+  the CSVs into the 14 raw tables. The `sql/` scripts then build the clean
+  tables, the features and the question views inside the database.
+- **bench** holds Python with pandas, R with data.table and the compiled C and
+  Rust programs. It idles until `bench/benchmark.py`, running on the laptop,
+  starts one implementation after another in it and watches the memory of
+  every container.
+- The arrows carry data. Dotted arrows are control: commands sent from the
+  laptop, not data flowing between the services.
+
+## Repository layout
+
+```
+.
+├── team9.ipynb              the course notebook: the reference for every number
+├── data/                    the 14 CSVs; data/scaled/ is written by bench/scale_data.py (not committed)
+├── docker-compose.yml       services db, app, loader (profile load), bench (profile bench)
+├── .env.example             database name, user, password; copy to .env (not committed)
+├── requirements.txt         local Python environment
+├── impl/
+│   ├── python/              pandas: load.py, clean.py, questions.py, features.py (Sections 2, 4, 5, 6)
+│   ├── c/                   C port: f1.c, CSV parser, hash map, Makefile
+│   ├── rust/                Rust port: Cargo project, csv crate
+│   └── r/                   R port: data.table scripts, run.R, validation
+├── sql/
+│   ├── schema.sql           the 14 raw tables with primary and foreign keys
+│   ├── clean.sql            *_clean tables (Section 4)
+│   ├── features.sql         features_* tables (6.1–6.5)
+│   ├── questions.sql        Q1–Q3 as views (Section 5)
+│   ├── export_features.sql  the feature table in the shared output format
+│   ├── q1_index_timing.sql  Q1 with and without an index
+│   └── benchmark_results.sql  the results table of the benchmark
+├── loader/                  loader image: load_db.py (COPY), timed
+├── bench/
+│   ├── benchmark.py         the harness: runs everything, stores benchmark_results
+│   ├── run_pandas.py        one timed pandas run (used by the harness)
+│   ├── compare_outputs.py   checks a feature table against pandas'
+│   ├── scale_data.py        writes the 25%, 50%, ×10 and ×50 datasets
+│   ├── Dockerfile           bench image: builds C and Rust, adds R
+│   └── outputs/             feature tables written by the checks (not committed)
+├── app/                     dashboard image: app.py (Streamlit), port 8501
+└── docs/                    architecture.png ([#24](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/24), planned)
+```
 
 ## Python environment (local development)
 
