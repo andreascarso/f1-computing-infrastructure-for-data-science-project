@@ -393,7 +393,33 @@ a header and alignment padding, and the primary keys add indexes.
 - `--impl sql` resets the database (the loader drops and reloads the 14 raw
   tables), but not `benchmark_results`.
 
-## C port
+## Dashboard
+
+`app/app.py` is a Streamlit app in its own container (`app` in
+`docker-compose.yml`). It starts with the database and connects to it with
+`host=db`, like the loader:
+
+```bash
+docker compose up -d --build --wait   # db + app; --build picks up changes to app/app.py
+open http://localhost:8501
+```
+
+| tab | what it shows | read from |
+|---|---|---|
+| Q1 | per circuit, the podium rate from the front row in 1994–2013 and 2014–2024 (by grid or by qualifying), the rank correlation between the eras | views `q1_conversion`, `q1_rank_correlation` |
+| Q2 | home vs away podium rate per starting-position group, the weighted home advantage | views `q2_home_by_grid`, `q2_home_advantage` |
+| Q3 | mechanical-retirement rate per constructor in both periods | view `q3_mechanical_rate` |
+| Benchmark | per dataset: startup / parse / compute per implementation, each step side by side, memory, storage (CSV vs Postgres), and how the times grow from `25pct` to `x50` | table `benchmark_results` |
+
+The views come from `sql/questions.sql` (after `sql/clean.sql`); the benchmark
+creates them too when it runs SQL. Without them, or without benchmark results,
+the tab says which command to run. The answers are for the dataset that was
+loaded last: a benchmark run on a scaled dataset leaves that dataset in the
+database (the page header shows the number of races; `data/` has 1,125). The
+Benchmark tab shows the latest run of every implementation per dataset and, by
+default, only results whose output matched pandas. Queries are cached for
+30 seconds.
+
 
 `impl/c/` does notebook Section 2 (load), the results cleaning that 6.4 needs
 (4.9), the driver/constructor form (6.4) and Q1 (5.1) in plain C11. It uses no
