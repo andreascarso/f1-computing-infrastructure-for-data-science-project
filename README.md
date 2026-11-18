@@ -1,4 +1,99 @@
-# f1-computing-infrastructure-for-data-science-project
+# One F1 analysis, five tools
+
+**The question:** if you run the same Formula 1 data analysis in pandas, in a
+PostgreSQL database, and in C, Rust and R, how much faster or slower does it
+get, and how much memory does it need, as the data grows from a quarter of
+the real size to fifty times it?
+
+The analysis is the data work of our course notebook (`team9.ipynb`): load 75
+seasons of race results, clean them, answer three questions about the races
+and build the features for a podium-prediction model. The answers are shown in
+a dashboard next to the measurements.
+
+## Team
+
+| name | GitHub | role |
+|---|---|---|
+| Andrea Scarso | [@andreascarso](https://github.com/andreascarso) | Database: Docker Compose, schema, loader, the SQL cleaning, questions and features; project plan and Python environment |
+| Ece Zortuna | [@ecezortuna](https://github.com/ecezortuna) | pandas: cleaning, questions and features (Sections 4–6); the C and Rust ports |
+| Cedric Kopp | [@cedric-kopp](https://github.com/cedric-kopp) | pandas load; output check, scaled datasets, benchmark harness and bench image; dashboard |
+| Anna Luna Orso | [@annaluna2807](https://github.com/annaluna2807) | The R port (data.table) |
+
+## Design: six questions before writing code
+
+**1. What question do we answer?** Mainly the one above: for each step of the
+pipeline (load, clean, features, questions), how do time and memory compare
+across tools and data sizes, and why? The pipeline itself answers three F1
+questions (notebook Section 5):
+
+- **Q1:** which circuits turn a front-row start into a podium most often, and
+  did that change after 2014?
+- **Q2:** do drivers finish on the podium more often at home, once starting
+  position is taken into account?
+- **Q3:** which constructors retire most often for mechanical reasons, in
+  2014–2021 compared with 2022–2024?
+
+**2. What data?**
+
+- **Source:** [Formula 1 World Championship (1950 – 2024)](https://www.kaggle.com/datasets/rohanrao/formula-1-world-championship-1950-2020)
+  on Kaggle, compiled from the Ergast API.
+- **Licence:** CC0 (public domain).
+- **Size:** 14 CSV files, 22 MB, about 701,000 rows. `lap_times` makes up
+  589,000 of them; `results` has 26,759, one per driver per race, for 1,125
+  races.
+- **Copies:** they are in `data/`. For the scaling runs, `bench/scale_data.py`
+  writes 25%, 50%, ×10 and ×50 versions (5.1 MB to 1.3 GB).
+
+**3. Which database, and why?** PostgreSQL 16, in Docker.
+
+- **The data is relational:** 14 tables linked by ids (results → races →
+  circuits, results → drivers, …). Primary and foreign keys check those links
+  when the data is loaded.
+- **The work is SQL work:**
+  - the questions are joins and group-bys
+  - the rolling driver form (6.4) is a window function
+  - `COPY` loads a CSV in one command
+- **One container, many users:** Postgres runs as a server that the loader,
+  `psql` and the dashboard all connect to at the same time.
+- **Not chosen:**
+  - SQLite has no server, so the containers would have to share one file.
+  - DuckDB is a column store, built for exactly this kind of analysis, and
+    would likely be faster. We picked the row store the course uses and
+    measure what that costs.
+
+**4. How is the data processed?** The same notebook sections in several tools:
+
+| step | notebook | pandas | SQL | C, Rust, R |
+|---|---|---|---|---|
+| load the 14 CSVs | 2 | `read_csv` | `COPY` (loader container) | own CSV reading |
+| clean | 4 | all tables | all tables | only `results`, as 6.4 needs it |
+| features | 6 | all 22, in two versions: `transform(lambda)` and vectorised | 18 of 22, window functions | only form (6.4): 7 features |
+| Q1–Q3 | 5 | all three | all three, as views | Q1 only |
+
+pandas is the reference. Every other implementation writes its feature table
+in one shared format, and the benchmark only stores its numbers if that table
+matches pandas' (and, for the ports, Q1 too).
+
+**5. What does the user see?** A Streamlit dashboard on
+<http://localhost:8501> (its own container), with:
+
+- the answers to Q1–Q3, read from the database
+- the benchmark: time per step and implementation, memory, disk space, and how
+  the times grow with the data
+
+**6. What do we measure?** For every implementation and dataset (25%, 50%,
+100%, ×10, ×50):
+
+- **Time:** split into startup (starting the process or container), parse
+  (reading the CSVs) and compute (each cleaning, feature and question step),
+  plus wall-clock total. Each number is the median of at least 3 fresh runs.
+- **Memory:** the process's max RSS and the container's peak (`docker stats`).
+- **Disk:** the CSV files next to their size inside Postgres.
+
+All runs are on one laptop, with its CPU and Docker resources stored next to
+every number. `bench/benchmark.py` does the measuring and writes everything to
+the `benchmark_results` table.
+
 
 ## Python environment (local development)
 
