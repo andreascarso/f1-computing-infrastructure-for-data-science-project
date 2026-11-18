@@ -14,9 +14,9 @@ a dashboard next to the measurements.
 
 | name | GitHub | role |
 |---|---|---|
-| Andrea Scarso | [@andreascarso](https://github.com/andreascarso) | Database: Docker Compose, schema, loader, the SQL cleaning, questions and features; project plan and Python environment |
+| Andrea Scarso | [@andreascarso](https://github.com/andreascarso) | Database: Docker Compose, schema, loader, the SQL cleaning, questions and features; project plan |
 | Ece Zortuna | [@ecezortuna](https://github.com/ecezortuna) | pandas: cleaning, questions and features (Sections 4–6); the C and Rust ports |
-| Cedric Kopp | [@cedric-kopp](https://github.com/cedric-kopp) | pandas load; output check, scaled datasets, benchmark harness and bench image; dashboard |
+| Cedric Kopp | [@cedric-kopp](https://github.com/cedric-kopp) | Python environment and pandas load; output check, scaled datasets, benchmark harness and bench image; dashboard |
 | Anna Luna Orso | [@annaluna2807](https://github.com/annaluna2807) | The R port (data.table) |
 
 ## Design: six questions before writing code
@@ -193,6 +193,180 @@ flowchart LR
 ├── app/                     dashboard image: app.py (Streamlit), port 8501
 └── docs/                    architecture.png ([#24](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/24), planned)
 ```
+
+## How to run
+
+Needs Docker with Compose v2 and Python 3.11+ (only the standard library; the
+pandas scripts themselves run in containers). From a fresh clone, in order:
+
+```bash
+# 1. Settings: the database password stays on your laptop
+cp .env.example .env                     # then set POSTGRES_PASSWORD in .env
+
+# 2. Start the database and the dashboard (waits until both are healthy)
+docker compose up -d --build --wait
+
+# 3. Load the 14 CSVs into Postgres
+docker compose run --rm --build loader
+
+# 4. Clean, build the features and answer Q1-Q3 inside the database
+for script in clean features questions; do
+  docker compose exec -T db sh -c 'psql -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < sql/$script.sql
+done
+
+# 5. Look at the answers
+open http://localhost:8501               # Linux: xdg-open, or paste the address into a browser
+
+# 6. Measure: write the scaled datasets, run every implementation on them
+python3 bench/scale_data.py data/
+python3 bench/benchmark.py --datasets 25pct 50pct data x10 x50
+#    then reload the dashboard's Benchmark tab
+
+# 7. Stop (the data stays in the dbdata volume; add -v to delete it too)
+docker compose down
+```
+
+Step 6 takes a while: `x50` alone is several minutes of SQL loading, and pandas
+needs about 6.4 GB there (see Benchmark). `--datasets data` is a quick first run.
+The benchmark reloads the database for every dataset, so afterwards it holds the
+last one; repeat steps 3 and 4 to get `data/` back. Each step is explained in
+the sections below.
+
+## Measurement plan
+
+**What:** every implementation on five sizes of the same data: 25%, 50%,
+100% (`data/`), ×10 and ×50 ([#22](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/22)). For each run:
+
+| what | how |
+|---|---|
+| startup | a process that only starts (interpreter, libraries, container), timed like a real run |
+| parse | reading the 14 CSVs (`read_csv`, `COPY`, the ports' own readers) |
+| compute | each step after that, timed on its own: clean, features, form (6.4), Q1–Q3 |
+| total | wall clock of the whole run, measured from outside the process |
+| memory | the process's max RSS; for SQL the db container's peak (`docker stats`) |
+| disk | the CSV files next to the same tables in Postgres, and the whole database |
+
+**Fairness rules:**
+
+1. **One machine.** Every number comes from the same laptop with the same Docker
+   limits, stored with the result (CPU, number of CPUs, memory). Nothing else
+   heavy runs at the same time.
+2. **Same conditions for everyone.** Every implementation runs in a container
+   and reads the same files from the same mount. Each repetition is a fresh
+   process, so no run profits from data loaded by the previous one. The output
+   check reads the CSVs before any timed run, so no implementation pays for
+   reading them from a cold disk.
+3. **Median of 3 or more.** Every number is the median of at least three runs,
+   with the minimum and maximum kept next to it.
+4. **Startup, parse and compute apart.** A C program starts in milliseconds,
+   Python with pandas in about a quarter of a second. Kept apart, the startup
+   difference doesn't hide the difference in the work itself.
+5. **Correct first.** A number only counts if the implementation's output matches
+   pandas (`bench/compare_outputs.py`, and Q1 for the ports). Otherwise nothing
+   of that dataset is stored.
+6. **Like with like.** The ports do less than pandas and SQL (form and Q1, not
+   all of Sections 4–6), so they are compared step by step, not by total.
+7. **Threads as shipped.** pandas, C, Rust and R (one data.table thread) use
+   one core. Postgres may use parallel workers for a query, as it does by
+   default; we leave that on and say so.
+
+**Results**, filled in by [#29](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/29) from `benchmark_results`. Times are medians
+of 3 runs, in seconds; the machine is written above the tables.
+
+**Total, wall clock** (s)
+
+| dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
+|---|---|---|---|---|---|---|
+| 25% | | | | | | |
+| 50% | | | | | | |
+| 100% (`data/`) | | | | | | |
+| ×10 | | | | | | |
+| ×50 | | | | | | |
+
+**Load: parse the 14 CSVs** (s)
+
+| dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
+|---|---|---|---|---|---|---|
+| 25% | | | | | | |
+| 50% | | | | | | |
+| 100% (`data/`) | | | | | | |
+| ×10 | | | | | | |
+| ×50 | | | | | | |
+
+**Form (6.4)** (s)
+
+| dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
+|---|---|---|---|---|---|---|
+| 25% | | | | | | |
+| 50% | | | | | | |
+| 100% (`data/`) | | | | | | |
+| ×10 | | | | | | |
+| ×50 | | | | | | |
+
+**Peak memory** (MiB; max RSS, SQL: db container peak)
+
+| dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
+|---|---|---|---|---|---|---|
+| 25% | | | | | | |
+| 50% | | | | | | |
+| 100% (`data/`) | | | | | | |
+| ×10 | | | | | | |
+| ×50 | | | | | | |
+
+**Disk** (MB)
+
+| dataset | 14 CSVs | 14 tables in Postgres | whole database |
+|---|---|---|---|
+| 25% | | | |
+| 50% | | | |
+| 100% (`data/`) | | | |
+| ×10 | | | |
+| ×50 | | | |
+
+## Calendar
+
+Two milestones: **Checkpoint, 12 Nov** (a working demo end to end: compose up,
+data in the database, one result, one timing) and **Final, 19 Nov**
+(measurements, README, slides). What was merged when:
+
+| dates | milestone | done |
+|---|---|---|
+| 30 Oct – 6 Nov | Checkpoint | repository, notebook and data; project plan and issues; Python environment; pandas load and cleaning; PostgreSQL service ([#31](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/31), [#33](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/33)–[#36](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/36)) |
+| 7 – 12 Nov | Checkpoint | pandas questions and features in both versions ([#37](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/37), [#38](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/38)) |
+| 13 – 16 Nov | Final | output check, scaled datasets ([#39](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/39), [#40](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/40)); schema, loader, SQL cleaning and questions ([#41](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/41)–[#44](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/44)) |
+| 17 Nov | Final | SQL features; C, Rust and R ports; benchmark harness ([#45](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/45)–[#49](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/49)) |
+| 18 Nov | Final | bench image with all ports, dashboard, README ([#50](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/50)–[#53](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/53) and this one) |
+| 18 – 19 Nov | Final | architecture diagram [#24](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/24), measurements table [#29](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/29), slides and demo video [#30](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/30) |
+
+The SQL part of the checkpoint (loader, SQL cleaning, Q1 from the database)
+was merged on 15–16 Nov, after the checkpoint date.
+
+## Workflow
+
+1. **One issue, one branch:** `<issue number>-<short-name>`, e.g.
+   `21-benchmark-harness`, branched from an up-to-date `main`.
+2. **Commits** say what changed, with the issue number:
+   `bench: harness with startup/parse/compute (#21)`.
+3. **Pull request** into `main`, with `Closes #N` in the description, what was
+   tested, and anything the reviewer should look at.
+4. **Review:** another member reads it and merges it on GitHub. Nobody pushes to
+   `main` directly.
+5. **Never committed:** `.env` (passwords), `data/scaled/` and `bench/outputs/`
+   (generated), build output; `.gitignore` keeps them out.
+
+## Who did what
+
+From the merged pull requests; each member adds anything that is missing.
+
+- **Andrea Scarso:** project plan and issues ([#31](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/31)); PostgreSQL service
+  ([#36](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/36)); schema, loader, SQL cleaning, questions and features
+  ([#41](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/41)–[#45](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/45)).
+- **Ece Zortuna:** pandas cleaning, Q1–Q3 and features ([#35](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/35), [#37](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/37),
+  [#38](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/38)); C port ([#46](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/46)); Rust port ([#47](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/47)).
+- **Cedric Kopp:** Python environment and pandas load ([#33](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/33), [#34](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/34)); output
+  check, scaled datasets ([#39](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/39), [#40](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/40)); benchmark harness and bench image
+  ([#49](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/49), [#50](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/50)); dashboard ([#51](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/51)); README ([#52](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/52), [#53](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/53)).
+- **Anna Luna Orso:** R port ([#48](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/pull/48)).
 
 ## Python environment (local development)
 
