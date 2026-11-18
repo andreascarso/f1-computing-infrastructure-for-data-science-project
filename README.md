@@ -252,58 +252,119 @@ the sections below.
    one core. Postgres may use parallel workers for a query, as it does by
    default; we leave that on and say so.
 
-**Results**, filled in by [#29](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/29) from `benchmark_results`. Times are medians
-of 3 runs, in seconds; the machine is written above the tables.
+**Results** (run `2026-11-18T12:38:25`, all in `benchmark_results`). MacBook Pro
+14" with an Apple M4 (10 cores) and 32 GB of RAM, macOS 26.6; Docker Engine 29.8
+with 10 CPUs and 7.7 GiB. Every number is the median of 3 runs (the slowest run
+was at most 1.27× the fastest, except C on ×50 at 1.47×), and every output
+matched pandas: the feature table and, for the ports, Q1.
 
-**Total, wall clock** (s)
-
-| dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
-|---|---|---|---|---|---|---|
-| 25% | | | | | | |
-| 50% | | | | | | |
-| 100% (`data/`) | | | | | | |
-| ×10 | | | | | | |
-| ×50 | | | | | | |
-
-**Load: parse the 14 CSVs** (s)
+**Total, wall clock** (one whole run, including startup; not the same work in
+every column, see the steps below)
 
 | dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
 |---|---|---|---|---|---|---|
-| 25% | | | | | | |
-| 50% | | | | | | |
-| 100% (`data/`) | | | | | | |
-| ×10 | | | | | | |
-| ×50 | | | | | | |
+| 25% | 400 ms | 1.02 s | 1.60 s | 43 ms | 47 ms | 386 ms |
+| 50% | 390 ms | 1.21 s | 2.71 s | 55 ms | 64 ms | 454 ms |
+| 100% (`data/`) | 499 ms | 1.58 s | 5.03 s | 81 ms | 90 ms | 603 ms |
+| ×10 | 2.46 s | 14.3 s | 64.8 s | 541 ms | 577 ms | 3.56 s |
+| ×50 | 13.1 s | 76.8 s | 346.9 s | 2.67 s | 3.25 s | 17.5 s |
 
-**Form (6.4)** (s)
-
-| dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
-|---|---|---|---|---|---|---|
-| 25% | | | | | | |
-| 50% | | | | | | |
-| 100% (`data/`) | | | | | | |
-| ×10 | | | | | | |
-| ×50 | | | | | | |
-
-**Peak memory** (MiB; max RSS, SQL: db container peak)
+**Startup** (a process that does nothing yet: interpreter, libraries, `docker exec`;
+SQL: `psql` plus a new loader container)
 
 | dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
 |---|---|---|---|---|---|---|
-| 25% | | | | | | |
-| 50% | | | | | | |
-| 100% (`data/`) | | | | | | |
-| ×10 | | | | | | |
-| ×50 | | | | | | |
+| 25% | 254 ms | 215 ms | 404 ms | 31 ms | 30 ms | 127 ms |
+| 100% (`data/`) | 212 ms | 214 ms | 405 ms | 34 ms | 34 ms | 145 ms |
+| ×50 | 282 ms | 221 ms | 403 ms | 39 ms | 39 ms | 137 ms |
+
+**Load: parse the 14 CSVs**
+
+| dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
+|---|---|---|---|---|---|---|
+| 25% | 36 ms | 35 ms | 732 ms | 9.8 ms | 14 ms | 52 ms |
+| 50% | 52 ms | 53 ms | 1.54 s | 18 ms | 26 ms | 88 ms |
+| 100% (`data/`) | 97 ms | 97 ms | 3.22 s | 38 ms | 48 ms | 168 ms |
+| ×10 | 704 ms | 724 ms | 49.4 s | 377 ms | 440 ms | 1.49 s |
+| ×50 | 3.86 s | 3.82 s | 263.4 s | 1.94 s | 2.63 s | 7.82 s |
+
+**Form (6.4)**, the same seven features everywhere
+
+| dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
+|---|---|---|---|---|---|---|
+| 25% | 29 ms | 703 ms | 18 ms | 0.9 ms | 0.9 ms | 90 ms |
+| 50% | 40 ms | 875 ms | 34 ms | 1.7 ms | 1.7 ms | 146 ms |
+| 100% (`data/`) | 53 ms | 1.14 s | 72 ms | 3.2 ms | 3.2 ms | 182 ms |
+| ×10 | 520 ms | 12.5 s | 851 ms | 39 ms | 37 ms | 1.49 s |
+| ×50 | 2.83 s | 66.5 s | 3.96 s | 204 ms | 217 ms | 7.53 s |
+
+**Q1 (5.1)** (pandas-lambda skips Q1–Q3: they don't depend on the form version)
+
+| dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
+|---|---|---|---|---|---|---|
+| 25% | 4.8 ms | – | 2.6 ms | 0.1 ms | 0.1 ms | 13 ms |
+| 100% (`data/`) | 6.8 ms | – | 9.4 ms | 0.4 ms | 0.4 ms | 17 ms |
+| ×10 | 32 ms | – | 103 ms | 3.0 ms | 5.1 ms | 55 ms |
+| ×50 | 212 ms | – | 691 ms | 24 ms | 37 ms | 275 ms |
+
+**Peak memory** (MiB; the process's max RSS; SQL: the db container's peak in `docker stats`)
+
+| dataset | pandas | pandas (lambda) | SQL | C | Rust | R |
+|---|---|---|---|---|---|---|
+| 25% | 104 | 122 | 188 | 16 | 16 | 89 |
+| 50% | 152 | 173 | 190 | 31 | 31 | 99 |
+| 100% (`data/`) | 225 | 255 | 202 | 63 | 60 | 148 |
+| ×10 | 1,297 | 1,606 | 404 | 636 | 592 | 493 |
+| ×50 | 5,778 | 7,194 | 1,180 | 3,276 | 3,016 | 2,218 |
 
 **Disk** (MB)
 
 | dataset | 14 CSVs | 14 tables in Postgres | whole database |
 |---|---|---|---|
-| 25% | | | |
-| 50% | | | |
-| 100% (`data/`) | | | |
-| ×10 | | | |
-| ×50 | | | |
+| 25% | 5.1 | 19.2 (3.7×) | 50.5 |
+| 50% | 10.6 | 38.7 (3.7×) | 89.9 |
+| 100% (`data/`) | 22.0 | 79.8 (3.6×) | 173.3 |
+| ×10 | 244.9 | 772.3 (3.2×) | 1,577.3 |
+| ×50 | 1,297.2 | 3,850.0 (3.0×) | 7,813.8 |
+
+The whole database also holds the `_clean` and `features_` tables.
+
+**What the numbers mean**
+
+- **Scaling:** from `data/` to ×50 (50 times the rows), form grows 41 to
+  68 times in every tool (53× in pandas, 55× in SQL, 64× in C) and pandas'
+  cleaning 46×: close to linear. The ranking hardly changes with size; only
+  SQL and vectorised pandas swap places on form (SQL is faster on 25% and
+  50%, pandas from `data/` on). The exception is SQL's cleaning, 86× (530 ms to 45.4 s), which
+  writes 11 new tables to disk. The totals of the small sets hardly grow,
+  because startup is a fixed cost: pandas takes 400 ms on 25% and 499 ms on
+  `data/`, four times the data.
+- **Startup cost:** fixed per tool and independent of the data: about 35 ms
+  for C and Rust (mostly `docker exec` itself), 135 ms for R, 215 ms for
+  Python with pandas, 400 ms for SQL (a new loader container plus `psql`). On
+  `data/`, startup is 42% of the total for both pandas and C; on ×50 it no
+  longer matters.
+- **Loading is where SQL pays:** `COPY` writes every row to disk and checks
+  23 foreign keys and every primary key, in one transaction, at 5 to 7 MB/s.
+  `read_csv` only builds arrays in memory. So the database loads 20 to 70 times
+  slower than pandas, and stores the data at 3 to 3.7 times its CSV size. In
+  return its memory stays small (1,180 MiB on ×50, against 5,778 MiB for
+  pandas), and once the data is in, form in SQL is close to pandas (3.96 s
+  against 2.83 s on ×50).
+- **Index effect:** none for Q1. With an index on the one unindexed join key,
+  `qualifying_clean (raceId, driverId)`, Q1 takes the same time (`data/`
+  6.6 ms, ×10 103 ms, ×50 198 ms; see Database) and the planner never uses
+  it. Q1 reads every result row from 1994 on and joins about 85% of them to
+  qualifying; for that, one sequential scan plus a hash join is cheaper than
+  one index lookup per row.
+- **C vs Rust:** the compute steps are equal: form 204 ms in C against
+  217 ms in Rust on ×50. C parses faster (1.94 s against 2.63 s), because it
+  splits the file buffer in place, while Rust's `csv` crate copies each field
+  and checks that it is valid UTF-8. Both are about 14× faster than vectorised
+  pandas on form and over 300× faster than the `transform(lambda)` version (66.5 s), the
+  slowest compute step in the whole benchmark. R with data.table is between
+  the two pandas versions on form, and on ×10 and ×50 needs the least memory of
+  the ports.
 
 ## Calendar
 
@@ -692,39 +753,8 @@ reloading the data: one row per number, in long format (`implementation`,
 docker compose exec db sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c "SELECT dataset, implementation, step, kind, value FROM benchmark_results ORDER BY 1, 2, 4"'
 ```
 
-Example on `data/` (Apple M4, Docker with 10 CPUs and 7.7 GiB; medians of 3;
-every output matched pandas):
-
-| implementation | startup | parse | compute | total | max RSS |
-|---|---|---|---|---|---|
-| pandas | 227 ms | 106 ms | 189 ms | 536 ms | 225 MiB |
-| pandas-lambda | 227 ms | 103 ms | 1.28 s | 1.64 s | 255 MiB |
-| sql | 431 ms | 3.32 s | 852 ms | 5.26 s | 206 MiB (db peak) |
-| c | 35 ms | 42 ms | 10 ms | 87 ms | 63 MiB |
-| rust | 35 ms | 49 ms | 8 ms | 93 ms | 60 MiB |
-| r | 133 ms | 174 ms | 284 ms | 635 ms | 148 MiB |
-
-The compute column is not the same work in every row: pandas and SQL clean all
-14 tables and build 22 (SQL: 18) features plus Q1–Q3, the ports clean only what
-form needs and do form and Q1. Compare them step by step:
-
-| step, `x10` | pandas | c | rust | r |
-|---|---|---|---|---|
-| load (parse) | 761 ms | 384 ms | 428 ms | 1.53 s |
-| form (6.4) | 521 ms | 32 ms | 33 ms | 1.49 s |
-| Q1 (5.1) | 32 ms | 2.9 ms | 5.1 ms | 55 ms |
-| max RSS | 1,301 MiB | 637 MiB | 595 MiB | 493 MiB |
-
-Earlier run on `x10` with SQL (medians of 3):
-
-| implementation | startup | parse | compute | total | peak memory |
-|---|---|---|---|---|---|
-| pandas | 253 ms | 811 ms | 1.60 s | 2.75 s | 1,433 MiB |
-| pandas-lambda | 248 ms | 730 ms | 14.4 s | 15.7 s | 1,798 MiB |
-| sql | 431 ms | 37.1 s | 11.8 s | 52.9 s | 394 MiB |
-
-The 14 tables take 772 MB in Postgres for 245 MB of CSV (3.2×): every row has
-a header and alignment padding, and the primary keys add indexes.
+The numbers of a full run, on all five datasets, are under
+[Measurement plan → Results](#measurement-plan).
 
 **Keep in mind:**
 
