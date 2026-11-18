@@ -124,28 +124,10 @@ benchmark harness [#21](https://github.com/andreascarso/f1-computing-infrastruct
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    csv[("data/*.csv<br/>14 files, or a scaled copy")]
-    subgraph compose["docker compose"]
-        loader["loader<br/>Python + psycopg<br/>(one-off job)"]
-        db[("db<br/>PostgreSQL 16<br/>volume dbdata")]
-        bench["bench<br/>pandas · C · Rust · R"]
-        app["app<br/>Streamlit"]
-    end
-    harness["bench/benchmark.py<br/>on the laptop"]
-    browser(["browser"])
+![Architecture: data/*.csv goes into the loader, which copies rows into the db (PostgreSQL); the app (Streamlit) reads the answers and benchmark_results with SQL and serves them on :8501; the bench container reads the CSVs too; bench/benchmark.py on the laptop drives bench, the loader and psql](docs/architecture.png)
 
-    csv -- "CSV, read-only mount" --> loader
-    loader -- "COPY: rows" --> db
-    csv -- "CSV, read-only mount" --> bench
-    db -- "SQL: Q1–Q3 views,<br/>benchmark_results" --> app
-    app -- ":8501" --> browser
-    harness -. "docker exec,<br/>docker stats" .-> bench
-    harness -. "runs loader, psql;<br/>COPY results" .-> db
-
-    style compose stroke-dasharray: 6 4
-```
+Source: `docs/architecture.svg`; after editing it, `python3 docs/render_architecture.py`
+writes the PNG again (needs Chrome or Chromium).
 
 - **db** is the only service that keeps state. `docker compose up -d` starts
   it and the **app**, which connects with `host=db` and is published on port
@@ -191,7 +173,7 @@ flowchart LR
 │   ├── Dockerfile           bench image: builds C and Rust, adds R
 │   └── outputs/             feature tables written by the checks (not committed)
 ├── app/                     dashboard image: app.py (Streamlit), port 8501
-└── docs/                    architecture.png ([#24](https://github.com/andreascarso/f1-computing-infrastructure-for-data-science-project/issues/24), planned)
+└── docs/                    architecture.svg and .png, render_architecture.py
 ```
 
 ## How to run
