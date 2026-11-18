@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="660" viewBox="0 0 1500 660"
+     font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+  <!-- Source of docs/architecture.png (issue #24). Edit this file, then
+       render it again with: python3 docs/render_architecture.py -->
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f2328"/>
+    </marker>
+    <marker id="arrow-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6e7781"/>
+    </marker>
+    <style>
+      .title  { font-size: 21px; font-weight: 700; fill: #1f2328; }
+      .sub    { font-size: 15px; fill: #57606a; }
+      .label  { font-size: 14px; fill: #1f2328; }
+      .clabel { font-size: 14px; fill: #57606a; font-style: italic; }
+      .box    { fill: #ffffff; stroke: #1f2328; stroke-width: 1.6; }
+      .ext    { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.4; }
+      .db     { fill: #cde2fb; stroke: #2a78d6; stroke-width: 1.8; }
+      .data   { fill: none; stroke: #1f2328; stroke-width: 2; marker-end: url(#arrow); }
+      .ctrl   { fill: none; stroke: #6e7781; stroke-width: 1.8; stroke-dasharray: 3 5; marker-end: url(#arrow-grey); }
+    </style>
+  </defs>
+
+  <rect width="1500" height="660" fill="#ffffff"/>
+
+  <!-- docker compose boundary -->
+  <rect x="250" y="40" width="975" height="440" rx="14" fill="#fbfbfa" stroke="#57606a" stroke-width="1.6" stroke-dasharray="9 6"/>
+  <text x="272" y="72" class="title" style="font-size:18px">docker compose</text>
+
+  <!-- data/*.csv (outside: files on the laptop, mounted read-only) -->
+  <path d="M24,150 h120 l30,30 v110 h-150 z" class="ext"/>
+  <path d="M144,150 v30 h30" fill="none" stroke="#8c959f" stroke-width="1.4"/>
+  <text x="99" y="218" text-anchor="middle" class="title">data/*.csv</text>
+  <text x="99" y="243" text-anchor="middle" class="sub">14 files, or a</text>
+  <text x="99" y="263" text-anchor="middle" class="sub">scaled copy</text>
+
+  <!-- loader -->
+  <rect x="300" y="150" width="190" height="130" rx="10" class="box"/>
+  <text x="395" y="198" text-anchor="middle" class="title">loader</text>
+  <text x="395" y="224" text-anchor="middle" class="sub">Python + psycopg</text>
+  <text x="395" y="246" text-anchor="middle" class="sub">one-off job</text>
+
+  <!-- db (cylinder) -->
+  <path d="M620,148 v134 a90,20 0 0 0 180,0 v-134" class="db"/>
+  <ellipse cx="710" cy="148" rx="90" ry="20" class="db"/>
+  <text x="710" y="210" text-anchor="middle" class="title">db</text>
+  <text x="710" y="236" text-anchor="middle" class="sub">PostgreSQL 16</text>
+  <text x="710" y="258" text-anchor="middle" class="sub">volume dbdata</text>
+
+  <!-- app -->
+  <rect x="1000" y="150" width="190" height="130" rx="10" class="box"/>
+  <text x="1095" y="208" text-anchor="middle" class="title">app</text>
+  <text x="1095" y="234" text-anchor="middle" class="sub">Streamlit</text>
+
+  <!-- browser (outside) -->
+  <rect x="1300" y="175" width="176" height="80" rx="40" class="ext"/>
+  <text x="1388" y="210" text-anchor="middle" class="title">browser</text>
+  <text x="1388" y="235" text-anchor="middle" class="sub">on the laptop</text>
+
+  <!-- bench -->
+  <rect x="300" y="350" width="190" height="100" rx="10" class="box"/>
+  <text x="395" y="390" text-anchor="middle" class="title">bench</text>
+  <text x="395" y="416" text-anchor="middle" class="sub">pandas · C · Rust · R</text>
+
+  <!-- harness (outside: runs on the laptop) -->
+  <rect x="560" y="540" width="300" height="84" rx="10" class="ext"/>
+  <text x="710" y="575" text-anchor="middle" class="title">bench/benchmark.py</text>
+  <text x="710" y="601" text-anchor="middle" class="sub">on the laptop: runs and times all</text>
+
+  <!-- data arrows -->
+  <path d="M174,215 H298" class="data"/>
+  <text x="212" y="201" text-anchor="middle" class="label">CSV</text>
+
+  <path d="M490,215 H618" class="data"/>
+  <text x="555" y="201" text-anchor="middle" class="label">rows (COPY)</text>
+
+  <path d="M800,215 H998" class="data"/>
+  <text x="899" y="184" text-anchor="middle" class="label">SQL: Q1–Q3 views,</text>
+  <text x="899" y="203" text-anchor="middle" class="label">benchmark_results</text>
+
+  <path d="M1190,215 H1298" class="data"/>
+  <text x="1262" y="203" text-anchor="middle" class="label">:8501</text>
+
+  <path d="M99,290 V400 H298" class="data"/>
+  <text x="200" y="391" text-anchor="middle" class="label">CSV</text>
+
+  <!-- control arrows (dotted): commands from the laptop -->
+  <path d="M560,582 H395 V452" class="ctrl"/>
+  <text x="478" y="552" text-anchor="middle" class="clabel">docker exec,</text>
+  <text x="478" y="572" text-anchor="middle" class="clabel">docker stats</text>
+
+  <path d="M710,540 V304" class="ctrl"/>
+  <text x="722" y="396" class="clabel">runs the loader and psql,</text>
+  <text x="722" y="416" class="clabel">stores the results (COPY)</text>
+
+  <!-- legend -->
+  <path d="M1000,560 H1060" class="data"/>
+  <text x="1072" y="565" class="label">data</text>
+  <path d="M1000,595 H1060" class="ctrl"/>
+  <text x="1072" y="600" class="label">commands from the laptop</text>
+</svg>
