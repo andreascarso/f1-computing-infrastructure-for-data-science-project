@@ -278,31 +278,60 @@ docker compose up -d --wait                          # the database must be runn
 python3 bench/benchmark.py                           # data/, all implementations, 3 runs
 python3 bench/benchmark.py --datasets data x10 --runs 5
 python3 bench/benchmark.py --impl sql --datasets x50
+python3 bench/benchmark.py --impl c rust r --datasets data x10
 ```
 
-Implementations: `pandas` (vectorised, version B), `pandas-lambda` (version A,
-only load, clean and features: Q1–Q3 do not depend on the version) and `sql`
-(loader + `clean.sql` + `features.sql` + `questions.sql`). The ports join in #28.
+Implementations:
+
+| name | what runs | notebook sections |
+|---|---|---|
+| `pandas` | `bench/run_pandas.py`, version B (vectorised) | load, clean, features (6.1–6.6), Q1–Q3 |
+| `pandas-lambda` | the same, version A (`transform(lambda)`) | load, clean, features (Q1–Q3 do not depend on the version) |
+| `sql` | loader + `clean.sql` + `features.sql` + `questions.sql` | load, clean, features (18 of 22), Q1–Q3 |
+| `c` | `impl/c`, compiled into the bench image | load, the cleaning that 6.4 needs, form (6.4), Q1 |
+| `rust` | `impl/rust`, compiled into the bench image | the same as C |
+| `r` | `Rscript impl/r/run.R`, one data.table thread | the same as C |
+
+`pandas` is always run (`bench/run_pandas.py --out`), since it is the reference
+the other outputs are checked against.
 Scaled datasets must be written first (see [Scaled datasets](#scaled-datasets)).
+
+**The bench image** (`bench/Dockerfile`) is a multi-stage build. Two builder
+stages compile the ports, C with `gcc -O2` on Debian and Rust with
+`cargo build --release --locked` on `rust:1.96-slim`, and only the two binaries
+(73 KB and 715 KB) are copied into the final image, which is `python:3.13-slim`
+with pandas, R and data.table (Debian's `r-base-core` and `r-cran-data.table`)
+and GNU `time`. The final image is 642 MB: 204 MB of Python base, about 215 MB
+of pandas and numpy, about 225 MB of R. Keeping the compilers in it would add
+about 1.2 GB (the Rust toolchain image alone is 1.14 GB, gcc about 180 MB) for
+nothing the benchmark runs. The price is a rebuild after every change to the C
+or Rust source; the harness builds the image each time it starts, and Docker's
+layer cache makes that a no-op otherwise. The Rust dependencies sit in their own
+layer, so a change to `src/` does not download and compile the `csv` crate
+again. The build context is the repository root, and
+`bench/Dockerfile.dockerignore` lets in only `impl/c`, `impl/rust` and
+`bench/requirements.txt`, so `.env` and `data/` never reach the build.
 
 **What it measures**, per dataset and implementation:
 
 | kind | how |
 |---|---|
-| startup | a no-op process in the same container, timed the same way as a real run: `python -c "import pandas, numpy"` in `bench`; `psql -c 'SELECT 1'` and the loader container with `python -c "import psycopg"` for SQL |
-| parse | reading the 14 CSVs: pandas `read_csv` (the `load_tables` timer); SQL `COPY` (the loader's "total (wall clock)") |
-| compute | clean, features and Q1–Q3. pandas: the script's own timers (`bench/run_pandas.py`). SQL: the scripts run with `\timing` on for every statement and the `Time:` lines are added up; Q1–Q3 are `EXPLAIN ANALYZE` of the question views (planning + execution inside Postgres). `form` (6.4) is stored too, as a part of `features` |
+| startup | a no-op process in the same container, timed the same way as a real run: `python -c "import pandas, numpy"` in `bench`; `psql -c 'SELECT 1'` and the loader container with `python -c "import psycopg"` for SQL; the C and Rust binaries without arguments (they print their usage and exit); `Rscript -e 'library(data.table)'` |
+| parse | reading the 14 CSVs: pandas `read_csv` (the `load_tables` timer); SQL `COPY` (the loader's "total (wall clock)"); the ports' own load timer |
+| compute | clean, features and Q1–Q3. pandas: the script's own timers (`bench/run_pandas.py`). SQL: the scripts run with `\timing` on for every statement and the `Time:` lines are added up; Q1–Q3 are `EXPLAIN ANALYZE` of the question views (planning + execution inside Postgres). `form` (6.4) is stored too, as a part of `features`. Ports: the times they print, for clean, form and Q1; R's form is its join + sort plus the rolling windows, since C and Rust sort inside their form step (the join + sort is stored on its own as a detail) |
 | total | wall clock of all processes of one repetition, measured from outside |
-| memory | the container's peak in `docker stats` (sampled every 0.5 s in the background; needs at least two samples, so runs under about a second have none), its idle value before the benchmark, and for pandas the process's own max RSS (`getrusage`) |
+| memory | the container's peak in `docker stats` (sampled every 0.5 s in the background; needs at least two samples, so runs under about a second have none), its idle value before the benchmark, and the process's own max RSS: `getrusage` for pandas, GNU `time` for C, Rust and R |
 | storage | after the SQL runs: every table's `pg_total_relation_size()` next to its CSV, the 14 tables together and `pg_database_size()` |
 
 Each repetition is a fresh process (`docker exec` into the idle `bench`
 container, a new loader container, new `psql` processes); every number is the
 median of `--runs` repetitions (default 3), with min and max next to it.
 Before anything is stored, each implementation's feature table is compared with
-the pandas one (`bench/compare_outputs.py`, written to `bench/outputs/<dataset>/`).
-If one differs, nothing is stored for that dataset; `--skip-check` stores the
-results anyway, with `output_checked = false`.
+the pandas one (`bench/compare_outputs.py`, written to `bench/outputs/<dataset>/`;
+the ports have 7 of the 22 columns, which the check allows). The ports' Q1
+(`--q1-out`) is compared with the pandas Q1 too: the same circuits and eras,
+equal counts, rates within 1e-6. If anything differs, nothing is stored for that
+dataset; `--skip-check` stores the results anyway, with `output_checked = false`.
 
 The table is created by the harness (`sql/benchmark_results.sql`) and survives
 reloading the data: one row per number, in long format (`implementation`,
@@ -313,7 +342,30 @@ reloading the data: one row per number, in long format (`implementation`,
 docker compose exec db sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c "SELECT dataset, implementation, step, kind, value FROM benchmark_results ORDER BY 1, 2, 4"'
 ```
 
-Example on `x10` (Apple M4, Docker with 10 CPUs and 7.7 GiB; medians of 3):
+Example on `data/` (Apple M4, Docker with 10 CPUs and 7.7 GiB; medians of 3;
+every output matched pandas):
+
+| implementation | startup | parse | compute | total | max RSS |
+|---|---|---|---|---|---|
+| pandas | 227 ms | 106 ms | 189 ms | 536 ms | 225 MiB |
+| pandas-lambda | 227 ms | 103 ms | 1.28 s | 1.64 s | 255 MiB |
+| sql | 431 ms | 3.32 s | 852 ms | 5.26 s | 206 MiB (db peak) |
+| c | 35 ms | 42 ms | 10 ms | 87 ms | 63 MiB |
+| rust | 35 ms | 49 ms | 8 ms | 93 ms | 60 MiB |
+| r | 133 ms | 174 ms | 284 ms | 635 ms | 148 MiB |
+
+The compute column is not the same work in every row: pandas and SQL clean all
+14 tables and build 22 (SQL: 18) features plus Q1–Q3, the ports clean only what
+form needs and do form and Q1. Compare them step by step:
+
+| step, `x10` | pandas | c | rust | r |
+|---|---|---|---|---|
+| load (parse) | 761 ms | 384 ms | 428 ms | 1.53 s |
+| form (6.4) | 521 ms | 32 ms | 33 ms | 1.49 s |
+| Q1 (5.1) | 32 ms | 2.9 ms | 5.1 ms | 55 ms |
+| max RSS | 1,301 MiB | 637 MiB | 595 MiB | 493 MiB |
+
+Earlier run on `x10` with SQL (medians of 3):
 
 | implementation | startup | parse | compute | total | peak memory |
 |---|---|---|---|---|---|
@@ -335,6 +387,9 @@ a header and alignment padding, and the primary keys add indexes.
 - pandas needs about 6.4 GB on `x50` (measured outside Docker). Docker Desktop's
   default memory limit may be too small; raise it under *Settings → Resources*
   if a run stops with exit code 137.
+- R in the image is Debian's 4.5.0 with data.table 1.17.0; `impl/r` was
+  written with R 4.6.1 and data.table 1.18.6.1. The outputs match pandas with
+  both.
 - `--impl sql` resets the database (the loader drops and reloads the 14 raw
   tables), but not `benchmark_results`.
 

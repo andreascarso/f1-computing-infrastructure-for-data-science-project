@@ -33,10 +33,13 @@ services:
 
   # Runs the implementations for bench/benchmark.py, which starts it, runs each
   # repetition with `docker exec` and stops it again. The profile keeps it out
-  # of `docker compose up`.
+  # of `docker compose up`. The image also holds R and the compiled C and Rust
+  # ports (bench/Dockerfile).
   bench:
     profiles: ["bench"]
-    build: ./bench
+    build:
+      context: .                     # the C and Rust sources are compiled into the image
+      dockerfile: bench/Dockerfile   # bench/Dockerfile.dockerignore keeps the context small
     volumes:
       - ./impl:/work/impl:ro
       - ./data:/work/data:ro

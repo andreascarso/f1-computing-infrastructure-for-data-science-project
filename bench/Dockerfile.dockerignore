@@ -1,0 +1,9 @@
+# Build context of bench/Dockerfile, which is the repository root.
+# Exclude everything, then let in only what the Dockerfile copies: this keeps
+# .env, .git, data/ and .venv out of the context (and out of the image).
+*
+!bench/requirements.txt
+!impl/c
+!impl/rust
+impl/c/build
+impl/rust/target
