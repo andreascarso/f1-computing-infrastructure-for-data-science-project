@@ -10,7 +10,7 @@ seasons of race results, clean them, answer three questions about the races
 and build the features for a podium-prediction model. The answers are shown in
 a dashboard next to the measurements.
 
-## Team
+## Team (Group I)
 
 | name | GitHub | role |
 |---|---|---|
