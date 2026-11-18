@@ -46,5 +46,18 @@ services:
       - ./bench:/work/bench   # writable: the check runs write bench/outputs/
     restart: "no"
 
+  # The dashboard: http://localhost:8501. Starts with `docker compose up -d`.
+  app:
+    build: ./app
+    env_file: .env
+    environment:
+      PGHOST: db            # the db service's name, as for the loader
+    ports:
+      - "8501:8501"         # laptop:container
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   dbdata:
